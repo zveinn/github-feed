@@ -410,8 +410,14 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 	activities := []PRActivity{}
 
 	// Initialize progress tracker
-	// Estimate: 1 rate limit check + 7 PR searches + 3 event pages + 5 issue searches = 16 API calls minimum
-	progress := &Progress{current: 0, total: 16}
+	// Start with minimum API calls: 7 PR searches + 5 issue searches = 12 base calls
+	// Add event pages only if not in local mode (3 pages)
+	// Note: total will be adjusted dynamically as we discover pagination and cross-references
+	initialTotal := 12 // 7 PR searches + 5 issue searches
+	if !localMode {
+		initialTotal += 3 // 3 event pages
+	}
+	progress := &Progress{current: 0, total: initialTotal}
 
 	if debugMode {
 		fmt.Println("Running optimized search queries...")
@@ -516,24 +522,9 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 		fmt.Println("Checking cross-references between PRs and issues...")
 	}
 
-	// Calculate number of cross-reference checks needed (issues x matching PRs in same repo)
-	crossRefChecks := 0
-	for j := range issueActivities {
-		issue := &issueActivities[j]
-		for i := range activities {
-			pr := &activities[i]
-			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
-				crossRefChecks++
-			}
-		}
-	}
-
-	// Update progress total to include cross-reference checks
-	// Each check may do up to 2 API calls (PR comments + issue comments)
-	progress.addToTotal(crossRefChecks)
-	if !debugMode {
-		progress.display()
-	}
+	// Note: Cross-reference checks may or may not make API calls depending on
+	// whether mentions are found in PR/issue bodies. We'll increment progress
+	// dynamically as API calls are made in areCrossReferenced()
 
 	linkedIssues := make(map[string]bool) // Track which issues are linked to at least one PR
 
@@ -738,6 +729,12 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 			}
 		}
 	} else {
+		// Add this API call to the progress total
+		progress.addToTotal(1)
+		if !debugMode {
+			progress.display()
+		}
+
 		// Fetch comments from GitHub API in online mode
 		prComments, _, err = client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
 			ListOptions: github.ListOptions{PerPage: 100},
@@ -898,8 +895,21 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 					seenPRsMu.Unlock()
 
 					if !seen {
+						// Add this PR fetch to the progress total
+						progress.addToTotal(1)
+						if !debugMode {
+							progress.display()
+						}
+
 						// Fetch the PR details
 						pr, _, err := client.PullRequests.Get(ctx, owner, repo, prNumber)
+
+						// Increment progress after API call
+						progress.increment()
+						if !debugMode {
+							progress.display()
+						}
+
 						if err != nil || pr.GetState() != "open" {
 							continue
 						}
@@ -1037,6 +1047,18 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			progress.display()
 		}
 
+		// If there are more pages, add them to the total on first page
+		if page == 1 && resp != nil && resp.NextPage != 0 {
+			lastPage := resp.LastPage
+			if lastPage > 1 {
+				additionalPages := lastPage - 1
+				progress.addToTotal(additionalPages)
+				if !debugMode {
+					progress.display()
+				}
+			}
+		}
+
 		if err != nil {
 			fmt.Printf("  [%s] Error searching: %v\n", label, err)
 			if resp != nil {
@@ -1082,8 +1104,21 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			seenPRsMu.Unlock()
 
 			if !seen {
+				// Add this PR detail fetch to the progress total
+				progress.addToTotal(1)
+				if !debugMode {
+					progress.display()
+				}
+
 				// Fetch the actual PR to get more details
 				pr, _, err := client.PullRequests.Get(ctx, owner, repo, *issue.Number)
+
+				// Increment progress after API call
+				progress.increment()
+				if !debugMode {
+					progress.display()
+				}
+
 				if err != nil {
 					// Log the error but still try to show the PR with limited info
 					fmt.Printf("  [%s] Warning: Could not fetch details for %s/%s#%d: %v\n", label, owner, repo, *issue.Number, err)
@@ -1297,6 +1332,18 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		progress.increment()
 		if !debugMode {
 			progress.display()
+		}
+
+		// If there are more pages, add them to the total on first page
+		if page == 1 && resp != nil && resp.NextPage != 0 {
+			lastPage := resp.LastPage
+			if lastPage > 1 {
+				additionalPages := lastPage - 1
+				progress.addToTotal(additionalPages)
+				if !debugMode {
+					progress.display()
+				}
+			}
 		}
 
 		if err != nil {
