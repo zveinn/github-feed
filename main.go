@@ -177,12 +177,11 @@ func loadEnvFile(path string) error {
 }
 
 func main() {
-	// Parse command line arguments first to get optional env path
+	// Parse command line arguments
 	var username string
 	var months int = 6 // Default to 6 months
 	var debugMode bool
 	var localMode bool
-	var envPath string
 	var allowedReposFlag string
 
 	// Parse arguments
@@ -214,16 +213,6 @@ func main() {
 			debugMode = true
 		} else if arg == "--local" {
 			localMode = true
-		} else if arg == "--env" || strings.HasPrefix(arg, "--env=") {
-			if strings.HasPrefix(arg, "--env=") {
-				envPath = strings.TrimPrefix(arg, "--env=")
-			} else if i+1 < len(os.Args) {
-				envPath = os.Args[i+1]
-				i++ // Skip next argument
-			} else {
-				fmt.Println("Error: --env requires a path argument")
-				os.Exit(1)
-			}
 		} else if arg == "--allowed-repos" || strings.HasPrefix(arg, "--allowed-repos=") {
 			if strings.HasPrefix(arg, "--allowed-repos=") {
 				allowedReposFlag = strings.TrimPrefix(arg, "--allowed-repos=")
@@ -239,18 +228,44 @@ func main() {
 		}
 	}
 
-	// Get executable directory for default paths
-	exePath, err := os.Executable()
+	// Get home directory for config paths
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Printf("Warning: Could not determine executable path: %v\n", err)
-		exePath = "."
+		fmt.Printf("Error: Could not determine home directory: %v\n", err)
+		os.Exit(1)
 	}
-	exeDir := filepath.Dir(exePath)
 
-	// Load .env file from specified path or default to program directory
-	if envPath == "" {
-		envPath = filepath.Join(exeDir, ".env")
+	// Create ~/.github-feed directory if it doesn't exist
+	configDir := filepath.Join(homeDir, ".github-feed")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		fmt.Printf("Error: Could not create config directory %s: %v\n", configDir, err)
+		os.Exit(1)
 	}
+
+	// Create .env file with template if it doesn't exist
+	envPath := filepath.Join(configDir, ".env")
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		envTemplate := `# GitHub Feed Configuration
+# Add your GitHub credentials here
+
+# Your GitHub Personal Access Token (required)
+# Generate at: https://github.com/settings/tokens
+# Required scopes: repo, read:org
+GITHUB_TOKEN=
+
+# Your GitHub username (required)
+GITHUB_USERNAME=
+
+# Optional: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)
+# Leave empty to allow all repos
+ALLOWED_REPOS=
+`
+		if err := os.WriteFile(envPath, []byte(envTemplate), 0600); err != nil {
+			fmt.Printf("Warning: Could not create .env file at %s: %v\n", envPath, err)
+		}
+	}
+
+	// Load .env file from config directory
 	_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
 
 	// Get username from command line or environment
@@ -282,8 +297,8 @@ func main() {
 		}
 	}
 
-	// Open database in program directory
-	dbPath := filepath.Join(exeDir, "github.db")
+	// Open database in config directory
+	dbPath := filepath.Join(configDir, "github.db")
 	db, err := OpenDatabase(dbPath)
 	if err != nil {
 		fmt.Printf("Warning: Failed to open database: %v\n", err)
@@ -307,20 +322,19 @@ func main() {
 		fmt.Println("3. Give it a name and select these scopes: 'repo', 'read:org'")
 		fmt.Println("4. Generate and copy the token")
 		fmt.Println("5. Export it: export GITHUB_TOKEN=your_token_here")
-		fmt.Println("6. Or add it to .env in the program directory")
+		fmt.Printf("6. Or add it to %s\n", envPath)
 		os.Exit(1)
 	}
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--months MONTHS] [--debug] [--local] [--env PATH] [--allowed-repos REPOS] [username]")
+		fmt.Println("Usage: gitai [--months MONTHS] [--debug] [--local] [--allowed-repos REPOS] [username]")
 		fmt.Println("  --months MONTHS: Show items from the last X months (default: 6)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
-		fmt.Println("  --env PATH: Specify custom .env file path (default: .env in program directory)")
 		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
-		fmt.Println("Or add it to .env")
+		fmt.Printf("Or add it to %s\n", envPath)
 		os.Exit(1)
 	}
 

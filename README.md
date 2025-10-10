@@ -22,6 +22,12 @@ go build -o github-feed .
 
 ## Configuration
 
+### First Run Setup
+
+On first run, GitAI automatically creates a configuration directory at `~/.github-feed/` with:
+- `.env` - Configuration file (with helpful template)
+- `github.db` - Local database for caching GitHub data
+
 ### GitHub Token Setup
 
 Create a GitHub Personal Access Token with the following scopes:
@@ -32,28 +38,30 @@ Create a GitHub Personal Access Token with the following scopes:
 
 ### Environment Setup
 
-You can provide your token and username in three ways:
+You can provide your token and username in two ways:
 
-**Option 1: Environment Variables**
+**Option 1: Configuration File (Recommended)**
+
+Edit `~/.github-feed/.env` and add your credentials:
+```bash
+# Your GitHub Personal Access Token (required)
+GITHUB_TOKEN=your_token_here
+
+# Your GitHub username (required)
+GITHUB_USERNAME=your_username
+
+# Optional: Comma-separated list of allowed repos
+ALLOWED_REPOS=user/repo1,user/repo2
+```
+
+**Option 2: Environment Variables**
 ```bash
 export GITHUB_TOKEN="your_token_here"
 export GITHUB_USERNAME="your_username"
 export ALLOWED_REPOS="user/repo1,user/repo2"  # Optional: filter to specific repos
 ```
 
-**Option 2: Configuration File**
-Create `.env` in the same directory as the gitai executable:
-```bash
-GITHUB_TOKEN=your_token_here
-GITHUB_USERNAME=your_username
-ALLOWED_REPOS=user/repo1,user/repo2  # Optional: filter to specific repos
-```
-
-**Option 3: Custom Configuration File**
-Use the `--env` flag to specify a custom path:
-```bash
-gitai --env /path/to/custom/.env
-```
+**Note:** Environment variables take precedence over the `.env` file.
 
 ## Usage
 
@@ -89,7 +97,6 @@ gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels
 | `--months MONTHS` | Show items from the last X months, both open and closed (default: 6) |
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
-| `--env PATH` | Specify custom .env file path (default: .env in program directory) |
 | `--allowed-repos REPOS` | Filter to specific repositories (comma-separated: `user/repo1,user/repo2`) |
 
 ### Color Coding
@@ -125,7 +132,7 @@ gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels
    - Your recent activity events
    - Issues you authored/mentioned/assigned/commented
 
-2. **Local Caching** - All fetched data is automatically saved to a local BBolt database (`github.db`)
+2. **Local Caching** - All fetched data is automatically saved to a local BBolt database (`~/.github-feed/github.db`)
    - PRs, issues, and comments are cached for offline access
    - Each item is stored/updated with a unique key
    - Database grows as you fetch more data
@@ -169,21 +176,18 @@ Wait for the rate limit to reset. Use `--debug` to see current rate limits.
 ### Progress bar looks garbled
 Your terminal may not support ANSI colors properly. Use `--debug` mode for plain text output.
 
-### No results showing
-- Verify your username is correct
-- Check that you have activity in the last 6 months
-- Try increasing the time range with `--months 12`
-
 ## Development
 
 ### Project Structure
 ```
-gitai/
-├── main.go           # Main application code
-├── db.go             # Database operations for caching GitHub data
-├── README.md         # This file
-├── .env              # Optional config file (in program directory)
-└── github.db         # BBolt database for caching (auto-created)
+github-feed/
+├── main.go                      # Main application code
+├── db.go                        # Database operations for caching GitHub data
+├── README.md                    # This file
+
+~/.github-feed/              # Config directory (auto-created)
+ ├── .env                     # Configuration file with credentials
+ └── github.db                # BBolt database for caching
 ```
 
 ## License
