@@ -64,7 +64,7 @@ gitai --env /path/to/custom/.env
 ### Basic Usage
 
 ```bash
-# Monitor open PRs and issues for the last 6 months
+# Monitor open PRs and issues for the last 6 months (fetches from GitHub)
 gitai
 
 # Include closed items from last month
@@ -72,6 +72,12 @@ gitai --closed
 
 # Show detailed logging output
 gitai --debug
+
+# Use local database instead of GitHub API (offline mode)
+gitai --local
+
+# Combine flags
+gitai --local --closed --debug
 ```
 
 ### Command Line Options
@@ -80,6 +86,7 @@ gitai --debug
 |------|-------------|
 | `--closed` | Include closed/merged PRs and issues from the last month |
 | `--debug` | Show detailed API call progress instead of progress bar |
+| `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--env PATH` | Specify custom .env file path (default: .gitai.env in program directory) |
 
 ## Output Format
@@ -133,6 +140,8 @@ CLOSED ISSUES:
 
 ## How It Works
 
+### Online Mode (Default)
+
 1. **Parallel Fetching** - Simultaneously searches for:
    - PRs you authored
    - PRs where you're mentioned
@@ -144,14 +153,29 @@ CLOSED ISSUES:
    - Your recent activity events
    - Issues you authored/mentioned/assigned/commented
 
-2. **Cross-Reference Detection** - Automatically finds connections between PRs and issues by:
+2. **Local Caching** - All fetched data is automatically saved to a local BBolt database (`gitai.db`)
+   - PRs, issues, and comments are cached for offline access
+   - Each item is stored/updated with a unique key
+   - Database grows as you fetch more data
+
+3. **Cross-Reference Detection** - Automatically finds connections between PRs and issues by:
    - Checking PR body and comments for issue references (`#123`, `fixes #123`, full URLs)
    - Checking issue body and comments for PR references
    - Displaying linked issues directly under their related PRs
 
-3. **Smart Filtering**:
+4. **Smart Filtering**:
    - **Default mode**: Open items updated in last 6 months
    - **Closed mode** (`--closed`): Closed/merged items from last month
+
+### Offline Mode (`--local`)
+
+- Reads all data from the local database instead of GitHub API
+- No internet connection or GitHub token required
+- Displays all cached PRs and issues
+- Useful for:
+  - Working offline
+  - Faster lookups when you don't need fresh data
+  - Reviewing previously fetched data
 
 ## API Rate Limits
 

@@ -10,29 +10,42 @@ GitAI is a Go CLI tool for monitoring GitHub pull requests and issues across rep
 
 ```bash
 # Build the binary
-go build -o gitai main.go
+go build -o gitai main.go db.go
 
-# Run directly
+# Run directly (fetches from GitHub API)
 ./gitai
 
 # Run with flags
 ./gitai --closed        # Include closed/merged items from last month
 ./gitai --debug         # Show detailed API logging instead of progress bar
+./gitai --local         # Use local database instead of GitHub API (offline mode)
+./gitai --env PATH      # Specify custom .env file path
 ```
 
 ## Configuration
 
-The tool requires a GitHub Personal Access Token with `repo` and `read:org` scopes. Configuration is loaded from:
+The tool requires a GitHub Personal Access Token with `repo` and `read:org` scopes (not needed in `--local` mode). Configuration is loaded from:
 1. Environment variables: `GITHUB_TOKEN` or `GITHUB_ACTIVITY_TOKEN`, and `GITHUB_USERNAME` or `GITHUB_USER`
-2. Config file at `~/.secret/.gitai.env` (see main.go:179)
+2. Config file at `.gitai.env` in the program directory (default)
+3. Custom config file specified with `--env PATH` flag
+
+Database location: `gitai.db` in the same directory as the executable
 
 ## Architecture & Key Components
 
 ### Data Flow
-1. **Parallel API Fetching** (main.go:345-380): Seven concurrent GitHub search queries for PRs (authored, mentioned, assigned, commented, reviewed, review-requested, involved) plus event polling
-2. **Issue Collection** (main.go:395-417): Five parallel searches for issues with similar categories
-3. **Cross-Reference Detection** (main.go:419-472): Links issues to PRs by checking PR/issue bodies and comments for references
-4. **Display Rendering** (main.go:531-601): Separates items into sections by state (open/merged/closed) with colorized output
+
+#### Online Mode (Default)
+1. **Parallel API Fetching** (main.go:~370-405): Seven concurrent GitHub search queries for PRs (authored, mentioned, assigned, commented, reviewed, review-requested, involved) plus event polling
+2. **Issue Collection** (main.go:~420-442): Five parallel searches for issues with similar categories
+3. **Database Caching** (db.go): All fetched PRs, issues, and comments are automatically saved to BBolt database
+4. **Cross-Reference Detection** (main.go:~444-497): Links issues to PRs by checking PR/issue bodies and comments for references
+5. **Display Rendering** (main.go:~556-626): Separates items into sections by state (open/merged/closed) with colorized output
+
+#### Offline Mode (`--local`)
+1. **Database Loading** (main.go:321-490 - `fetchAndDisplayFromDatabase`): Reads all PRs and issues from local database
+2. **Data Conversion**: Converts database records to PRActivity and IssueActivity structures
+3. **Display Rendering**: Same rendering logic as online mode, but with "CACHED" labels
 
 ### Core Data Structures
 
@@ -89,10 +102,24 @@ Uses `google/go-github/v57` library. Key API patterns:
 - PullRequests API for details (main.go:866): `client.PullRequests.Get()`
 - Rate limit checking (main.go:246-286): Monitors both core (5000/hr) and search (30/min) limits
 
+## Database Module (db.go)
+
+**Database** structure wraps BBolt operations with three buckets:
+- `pull_requests`: Stores PRs with key format `owner/repo#number`
+- `issues`: Stores issues with same key format
+- `comments`: Stores PR/issue comments with key format `owner/repo#number/type/commentID`
+
+Key functions:
+- `SavePullRequest`, `SaveIssue`, `SaveComment`: Update or insert items
+- `GetAllPullRequests`, `GetAllIssues`: Retrieve all items for offline mode
+- `Stats`: Returns count of items in each bucket
+
 ## Testing Considerations
 
 When modifying this codebase:
 - Test with both `--debug` and default modes (progress bar vs. detailed logs)
+- Test `--local` mode to ensure database reads work correctly
 - Verify mutex protection on any new shared data structures
-- Test cross-reference detection with various mention patterns (see mentionsNumber main.go:651-691)
+- Test cross-reference detection with various mention patterns (see mentionsNumber main.go:~675-715)
 - Consider GitHub API rate limits when adding new API calls
+- Ensure database writes don't fail silently (currently errors are ignored with `_`)

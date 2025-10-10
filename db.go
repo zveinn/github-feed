@@ -183,3 +183,65 @@ func (d *Database) Stats() (prCount, issueCount, commentCount int, err error) {
 	})
 	return
 }
+
+// GetAllPullRequests retrieves all pull requests from the database
+func (d *Database) GetAllPullRequests() (map[string]*github.PullRequest, error) {
+	prs := make(map[string]*github.PullRequest)
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pullRequestsBucket)
+		return b.ForEach(func(k, v []byte) error {
+			var pr github.PullRequest
+			if err := json.Unmarshal(v, &pr); err != nil {
+				return err
+			}
+			prs[string(k)] = &pr
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return prs, nil
+}
+
+// GetAllIssues retrieves all issues from the database
+func (d *Database) GetAllIssues() (map[string]*github.Issue, error) {
+	issues := make(map[string]*github.Issue)
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(issuesBucket)
+		return b.ForEach(func(k, v []byte) error {
+			var issue github.Issue
+			if err := json.Unmarshal(v, &issue); err != nil {
+				return err
+			}
+			issues[string(k)] = &issue
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return issues, nil
+}
+
+// GetAllComments retrieves all comments from the database
+func (d *Database) GetAllComments() ([]string, error) {
+	var comments []string
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(commentsBucket)
+		return b.ForEach(func(k, v []byte) error {
+			comments = append(comments, string(v))
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return comments, nil
+}
