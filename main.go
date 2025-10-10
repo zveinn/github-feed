@@ -759,7 +759,7 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 		// Save comments to database for future local mode use
 		if err == nil && db != nil {
 			for _, comment := range prComments {
-				_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment)
+				_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment, debugMode)
 			}
 		}
 	}
@@ -922,7 +922,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 								}
 							}
 							// Save PR to database
-							_ = db.SavePullRequest(owner, repo, pr)
+							_ = db.SavePullRequest(owner, repo, pr, debugMode)
 						}
 
 						activities = append(activities, PRActivity{
@@ -963,7 +963,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			return activities
 		}
 
-		allPRs, err := db.GetAllPullRequests()
+		allPRs, err := db.GetAllPullRequests(debugMode)
 		if err != nil {
 			if debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
@@ -1034,7 +1034,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 	page := 1
 	for {
 		if debugMode {
-			fmt.Printf("  [%s] Searching page %d...\n", label, page)
+			fmt.Printf("  [%s] Searching page %d with query: %s\n", label, page, query)
 		}
 		result, resp, err := client.Search.Issues(ctx, query, opts)
 
@@ -1045,11 +1045,15 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		}
 
 		if err != nil {
-			fmt.Printf("Error searching '%s': %v\n", query, err)
+			fmt.Printf("  [%s] Error searching: %v\n", label, err)
 			if resp != nil {
-				fmt.Printf("Rate limit remaining: %d\n", resp.Rate.Remaining)
+				fmt.Printf("  [%s] Rate limit remaining: %d/%d\n", label, resp.Rate.Remaining, resp.Rate.Limit)
 			}
 			return activities
+		}
+
+		if debugMode && resp != nil {
+			fmt.Printf("  [%s] API Response: %d results, Rate: %d/%d\n", label, len(result.Issues), resp.Rate.Remaining, resp.Rate.Limit)
 		}
 
 		pageResults := 0
@@ -1110,10 +1114,16 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 						// Compare timestamps - if API version is newer, mark as updated
 						if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
 							hasUpdates = true
+							if debugMode {
+								fmt.Printf("  [%s] Update detected: %s/%s#%d (API: %s > DB: %s)\n",
+									label, owner, repo, *issue.Number,
+									pr.GetUpdatedAt().Format("2006-01-02 15:04:05"),
+									cachedPR.GetUpdatedAt().Time.Format("2006-01-02 15:04:05"))
+							}
 						}
 					}
 					// Save PR to database
-					_ = db.SavePullRequest(owner, repo, pr)
+					_ = db.SavePullRequest(owner, repo, pr, debugMode)
 				}
 
 				activities = append(activities, PRActivity{
@@ -1215,7 +1225,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			return issueActivities
 		}
 
-		allIssues, err := db.GetAllIssues()
+		allIssues, err := db.GetAllIssues(debugMode)
 		if err != nil {
 			if debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
@@ -1286,7 +1296,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 	page := 1
 	for {
 		if debugMode {
-			fmt.Printf("  [%s] Searching page %d...\n", label, page)
+			fmt.Printf("  [%s] Searching page %d with query: %s\n", label, page, query)
 		}
 		result, resp, err := client.Search.Issues(ctx, query, opts)
 
@@ -1297,11 +1307,15 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		}
 
 		if err != nil {
-			fmt.Printf("Error searching '%s': %v\n", query, err)
+			fmt.Printf("  [%s] Error searching: %v\n", label, err)
 			if resp != nil {
-				fmt.Printf("Rate limit remaining: %d\n", resp.Rate.Remaining)
+				fmt.Printf("  [%s] Rate limit remaining: %d/%d\n", label, resp.Rate.Remaining, resp.Rate.Limit)
 			}
 			return issueActivities
+		}
+
+		if debugMode && resp != nil {
+			fmt.Printf("  [%s] API Response: %d results, Rate: %d/%d\n", label, len(result.Issues), resp.Rate.Remaining, resp.Rate.Limit)
 		}
 
 		pageResults := 0
@@ -1347,7 +1361,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 						}
 					}
 					// Save issue to database
-					_ = db.SaveIssue(owner, repo, issue)
+					_ = db.SaveIssue(owner, repo, issue, debugMode)
 				}
 
 				issueActivities = append(issueActivities, IssueActivity{
