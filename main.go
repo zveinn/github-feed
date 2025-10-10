@@ -18,21 +18,23 @@ import (
 
 // PRActivity represents a PR with its activity metadata
 type PRActivity struct {
-	Label     string
-	Owner     string
-	Repo      string
-	PR        *github.PullRequest
-	UpdatedAt time.Time
-	Issues    []IssueActivity // Related issues linked to this PR
+	Label      string
+	Owner      string
+	Repo       string
+	PR         *github.PullRequest
+	UpdatedAt  time.Time
+	HasUpdates bool            // True if API version is newer than cached version
+	Issues     []IssueActivity // Related issues linked to this PR
 }
 
 // IssueActivity represents an issue with its activity metadata
 type IssueActivity struct {
-	Label     string
-	Owner     string
-	Repo      string
-	Issue     *github.Issue
-	UpdatedAt time.Time
+	Label      string
+	Owner      string
+	Repo       string
+	Issue      *github.Issue
+	UpdatedAt  time.Time
+	HasUpdates bool // True if API version is newer than cached version
 }
 
 // Progress tracks API call progress
@@ -174,39 +176,12 @@ func loadEnvFile(path string) error {
 }
 
 func main() {
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		envPath := filepath.Join(homeDir, ".secret", ".gitai.env")
-		_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
-	}
-
-	// Get GitHub token from environment (try both variable names)
-	token := os.Getenv("GITHUB_ACTIVITY_TOKEN")
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
-	}
-	if token == "" {
-		fmt.Println("Error: GITHUB_ACTIVITY_TOKEN or GITHUB_TOKEN environment variable is required")
-		fmt.Println("\nTo generate a GitHub token:")
-		fmt.Println("1. Go to https://github.com/settings/tokens")
-		fmt.Println("2. Click 'Generate new token' -> 'Generate new token (classic)'")
-		fmt.Println("3. Give it a name and select these scopes: 'repo', 'read:org'")
-		fmt.Println("4. Generate and copy the token")
-		fmt.Println("5. Export it: export GITHUB_TOKEN=your_token_here")
-		fmt.Println("6. Or add it to ~/.secret/.gitai.env")
-		os.Exit(1)
-	}
-
-	// Parse command line arguments
+	// Parse command line arguments first to get optional env path
 	var username string
 	var includeClosed bool
 	var debugMode bool
-
-	// Get username from command line or environment
-	username = os.Getenv("GITHUB_USERNAME")
-	if username == "" {
-		username = os.Getenv("GITHUB_USER")
-	}
+	var localMode bool
+	var envPath string
 
 	// Parse arguments
 	for i := 1; i < len(os.Args); i++ {
@@ -215,18 +190,79 @@ func main() {
 			includeClosed = true
 		} else if arg == "--debug" {
 			debugMode = true
+		} else if arg == "--local" {
+			localMode = true
+		} else if arg == "--env" {
+			if i+1 < len(os.Args) {
+				envPath = os.Args[i+1]
+				i++ // Skip next argument
+			} else {
+				fmt.Println("Error: --env requires a path argument")
+				os.Exit(1)
+			}
 		} else if !strings.HasPrefix(arg, "--") {
 			username = arg
 		}
 	}
 
+	// Get executable directory for default paths
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("Warning: Could not determine executable path: %v\n", err)
+		exePath = "."
+	}
+	exeDir := filepath.Dir(exePath)
+
+	// Load .env file from specified path or default to program directory
+	if envPath == "" {
+		envPath = filepath.Join(exeDir, ".gitai.env")
+	}
+	_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
+
+	// Get username from command line or environment
+	username = os.Getenv("GITHUB_USERNAME")
 	if username == "" {
+		username = os.Getenv("GITHUB_USER")
+	}
+
+	// Open database in program directory
+	dbPath := filepath.Join(exeDir, "gitai.db")
+	db, err := OpenDatabase(dbPath)
+	if err != nil {
+		fmt.Printf("Warning: Failed to open database: %v\n", err)
+		fmt.Println("Continuing without database caching...")
+		db = nil
+	} else {
+		defer db.Close()
+	}
+
+	// Get GitHub token from environment (try both variable names)
+	// Skip token requirement in local mode
+	token := os.Getenv("GITHUB_ACTIVITY_TOKEN")
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	if token == "" && !localMode {
+		fmt.Println("Error: GITHUB_ACTIVITY_TOKEN or GITHUB_TOKEN environment variable is required")
+		fmt.Println("\nTo generate a GitHub token:")
+		fmt.Println("1. Go to https://github.com/settings/tokens")
+		fmt.Println("2. Click 'Generate new token' -> 'Generate new token (classic)'")
+		fmt.Println("3. Give it a name and select these scopes: 'repo', 'read:org'")
+		fmt.Println("4. Generate and copy the token")
+		fmt.Println("5. Export it: export GITHUB_TOKEN=your_token_here")
+		fmt.Println("6. Or add it to .gitai.env in the program directory")
+		os.Exit(1)
+	}
+
+	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--closed] [--debug] <username>")
+		fmt.Println("Usage: gitai [--closed] [--debug] [--local] [--env PATH] [username]")
 		fmt.Println("  --closed: Include closed PRs/issues from the last month")
 		fmt.Println("  --debug: Show detailed API progress")
+		fmt.Println("  --local: Use local database instead of GitHub API")
+		fmt.Println("  --env PATH: Specify custom .env file path (default: .gitai.env in program directory)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
-		fmt.Println("Or add it to ~/.secret/.gitai.env")
+		fmt.Println("Or add it to .gitai.env")
 		os.Exit(1)
 	}
 
@@ -240,7 +276,7 @@ func main() {
 		fmt.Println("Debug mode enabled")
 	}
 
-	fetchAndDisplayActivity(token, username, includeClosed, debugMode)
+	fetchAndDisplayActivity(token, username, includeClosed, debugMode, localMode, db)
 }
 
 func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) error {
@@ -285,18 +321,21 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMode bool) {
+func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMode bool, localMode bool, db *Database) {
 	startTime := time.Now()
+
 	ctx := context.Background()
 	client := github.NewClient(nil).WithAuthToken(token)
 
-	// Check rate limit before making API calls
-	if err := checkRateLimit(ctx, client, debugMode); err != nil {
-		fmt.Printf("Skipping this cycle due to rate limit: %v\n", err)
-		return
-	}
-	if debugMode {
-		fmt.Println()
+	// Check rate limit before making API calls (skip in local mode)
+	if !localMode {
+		if err := checkRateLimit(ctx, client, debugMode); err != nil {
+			fmt.Printf("Skipping this cycle due to rate limit: %v\n", err)
+			return
+		}
+		if debugMode {
+			fmt.Println()
+		}
 	}
 
 	// Track seen PRs to avoid duplicates
@@ -363,20 +402,22 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		query := pq.query
 		label := pq.label
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress)
+			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, localMode, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
 		})
 	}
 
-	// Also run event collection in parallel
-	prWg.Go(func() {
-		results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress)
-		activitiesMu.Lock()
-		activities = append(activities, results...)
-		activitiesMu.Unlock()
-	})
+	// Also run event collection in parallel (skip in local mode)
+	if !localMode {
+		prWg.Go(func() {
+			results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, db)
+			activitiesMu.Lock()
+			activities = append(activities, results...)
+			activitiesMu.Unlock()
+		})
+	}
 
 	prWg.Wait()
 
@@ -407,7 +448,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		query := iq.query
 		label := iq.label
 		issueWg.Go(func() {
-			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress)
+			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress, localMode, db)
 			issuesMu.Lock()
 			issueActivities = append(issueActivities, results...)
 			issuesMu.Unlock()
@@ -455,7 +496,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 			// Only check PRs in the same repo and same owner
 			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
 				wg.Go(func() {
-					if areCrossReferenced(ctx, client, pr, issue, debugMode, progress) {
+					if areCrossReferenced(ctx, client, pr, issue, debugMode, progress, localMode, db) {
 						pr.Issues = append(pr.Issues, *issue)
 						linkedIssues[issueKey] = true
 						if debugMode {
@@ -485,6 +526,14 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println()
 		fmt.Printf("Total fetch time: %v\n", duration.Round(time.Millisecond))
 		fmt.Printf("Found %d unique PRs and %d unique issues\n", len(activities), len(issueActivities))
+
+		// Show database statistics
+		if db != nil {
+			prCount, issueCount, commentCount, err := db.Stats()
+			if err == nil {
+				fmt.Printf("Database stats: %d PRs, %d issues, %d comments\n", prCount, issueCount, commentCount)
+			}
+		}
 		fmt.Println()
 	} else {
 		// Clear progress bar and add newline
@@ -534,11 +583,11 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("OPEN PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range openPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -551,11 +600,11 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("MERGED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range mergedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -568,11 +617,11 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("CLOSED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range closedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -585,7 +634,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("OPEN ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range openIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
 		}
 	}
 
@@ -596,12 +645,12 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("CLOSED ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range closedIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
 		}
 	}
 }
 
-func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity, debugMode bool, progress *Progress) bool {
+func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity, debugMode bool, progress *Progress, localMode bool, db *Database) bool {
 	prNumber := pr.PR.GetNumber()
 	issueNumber := issue.Issue.GetNumber()
 
@@ -624,16 +673,39 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 	}
 
 	// Check PR comments for issue mentions
-	prComments, _, err := client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
-		ListOptions: github.ListOptions{PerPage: 100},
-	})
+	var prComments []*github.PullRequestComment
+	var err error
 
-	// Increment progress after API call
-	progress.increment()
-	if !debugMode {
-		progress.display()
+	if localMode {
+		// Fetch comments from database in local mode
+		if db != nil {
+			prComments, err = db.GetPRComments(pr.Owner, pr.Repo, prNumber)
+			if err != nil && debugMode {
+				fmt.Printf("  Warning: Could not fetch comments from database for %s/%s#%d: %v\n",
+					pr.Owner, pr.Repo, prNumber, err)
+			}
+		}
+	} else {
+		// Fetch comments from GitHub API in online mode
+		prComments, _, err = client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
+			ListOptions: github.ListOptions{PerPage: 100},
+		})
+
+		// Increment progress after API call
+		progress.increment()
+		if !debugMode {
+			progress.display()
+		}
+
+		// Save comments to database for future local mode use
+		if err == nil && db != nil {
+			for _, comment := range prComments {
+				_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment)
+			}
+		}
 	}
 
+	// Check comments for issue mentions
 	if err == nil {
 		for _, comment := range prComments {
 			if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
@@ -690,7 +762,7 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
+func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, db *Database) []PRActivity {
 	// Fetch user's recent events to catch any PR activity
 	opts := &github.ListOptions{PerPage: 100}
 
@@ -775,12 +847,27 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 							continue
 						}
 
+						// Check if PR has updates compared to cached version
+						hasUpdates := false
+						if db != nil {
+							cachedPR, err := db.GetPullRequest(owner, repo, prNumber)
+							if err == nil {
+								// Compare timestamps - if API version is newer, mark as updated
+								if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
+									hasUpdates = true
+								}
+							}
+							// Save PR to database
+							_ = db.SavePullRequest(owner, repo, pr)
+						}
+
 						activities = append(activities, PRActivity{
-							Label:     "Recent Activity",
-							Owner:     owner,
-							Repo:      repo,
-							PR:        pr,
-							UpdatedAt: pr.GetUpdatedAt().Time,
+							Label:      "Recent Activity",
+							Owner:      owner,
+							Repo:       repo,
+							PR:         pr,
+							UpdatedAt:  pr.GetUpdatedAt().Time,
+							HasUpdates: hasUpdates,
 						})
 						totalPRs++
 					}
@@ -805,7 +892,69 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
+func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, db *Database) []PRActivity {
+	// In local mode, fetch from database instead of API
+	if localMode {
+		if db == nil {
+			return activities
+		}
+
+		allPRs, err := db.GetAllPullRequests()
+		if err != nil {
+			if debugMode {
+				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
+			}
+			return activities
+		}
+
+		if debugMode {
+			fmt.Printf("  [%s] Loading from database...\n", label)
+		}
+
+		totalFound := 0
+		for key, pr := range allPRs {
+			// Parse owner/repo from key format: "owner/repo#number"
+			parts := strings.Split(key, "/")
+			if len(parts) < 2 {
+				continue
+			}
+			owner := parts[0]
+			repoAndNum := parts[1]
+			repoParts := strings.Split(repoAndNum, "#")
+			if len(repoParts) < 2 {
+				continue
+			}
+			repo := repoParts[0]
+
+			prKey := key
+
+			seenPRsMu.Lock()
+			seen := seenPRs[prKey]
+			if !seen {
+				seenPRs[prKey] = true
+			}
+			seenPRsMu.Unlock()
+
+			if !seen {
+				activities = append(activities, PRActivity{
+					Label:     label,
+					Owner:     owner,
+					Repo:      repo,
+					PR:        pr,
+					UpdatedAt: pr.GetUpdatedAt().Time,
+				})
+				totalFound++
+			}
+		}
+
+		if debugMode && totalFound > 0 {
+			fmt.Printf("  [%s] Complete: %d PRs found\n", label, totalFound)
+		}
+
+		return activities
+	}
+
+	// Original API-based implementation
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -879,12 +1028,27 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 					}
 				}
 
+				// Check if PR has updates compared to cached version
+				hasUpdates := false
+				if db != nil {
+					cachedPR, err := db.GetPullRequest(owner, repo, *issue.Number)
+					if err == nil {
+						// Compare timestamps - if API version is newer, mark as updated
+						if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
+							hasUpdates = true
+						}
+					}
+					// Save PR to database
+					_ = db.SavePullRequest(owner, repo, pr)
+				}
+
 				activities = append(activities, PRActivity{
-					Label:     label,
-					Owner:     owner,
-					Repo:      repo,
-					PR:        pr,
-					UpdatedAt: pr.GetUpdatedAt().Time,
+					Label:      label,
+					Owner:      owner,
+					Repo:       repo,
+					PR:         pr,
+					UpdatedAt:  pr.GetUpdatedAt().Time,
+					HasUpdates: hasUpdates,
 				})
 				pageResults++
 				totalFound++
@@ -910,7 +1074,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 	return activities
 }
 
-func displayPR(label, owner, repo string, pr *github.PullRequest) {
+func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool) {
 	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if pr.UpdatedAt != nil {
@@ -920,7 +1084,14 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(pr.User.GetLogin())
 
-	fmt.Printf("%s %s %s %s/%s#%d - %s\n",
+	// Add update icon if item has updates
+	updateIcon := ""
+	if hasUpdates {
+		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
+	}
+
+	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
+		updateIcon,
 		dateStr,
 		labelColor.Sprint(strings.ToUpper(label)),
 		userColor.Sprint(pr.User.GetLogin()),
@@ -929,7 +1100,7 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 	)
 }
 
-func displayIssue(label, owner, repo string, issue *github.Issue, indented bool) {
+func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool) {
 	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if issue.UpdatedAt != nil {
@@ -946,7 +1117,14 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(issue.User.GetLogin())
 
-	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
+	// Add update icon if item has updates
+	updateIcon := ""
+	if hasUpdates {
+		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
+	}
+
+	fmt.Printf("%s%s%s %s %s %s/%s#%d - %s\n",
+		updateIcon,
 		indent,
 		dateStr,
 		labelColor.Sprint(strings.ToUpper(label)),
@@ -956,7 +1134,69 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	)
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress) []IssueActivity {
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, db *Database) []IssueActivity {
+	// In local mode, fetch from database instead of API
+	if localMode {
+		if db == nil {
+			return issueActivities
+		}
+
+		allIssues, err := db.GetAllIssues()
+		if err != nil {
+			if debugMode {
+				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
+			}
+			return issueActivities
+		}
+
+		if debugMode {
+			fmt.Printf("  [%s] Loading from database...\n", label)
+		}
+
+		totalFound := 0
+		for key, issue := range allIssues {
+			// Parse owner/repo from key format: "owner/repo#number"
+			parts := strings.Split(key, "/")
+			if len(parts) < 2 {
+				continue
+			}
+			owner := parts[0]
+			repoAndNum := parts[1]
+			repoParts := strings.Split(repoAndNum, "#")
+			if len(repoParts) < 2 {
+				continue
+			}
+			repo := repoParts[0]
+
+			issueKey := key
+
+			seenIssuesMu.Lock()
+			seen := seenIssues[issueKey]
+			if !seen {
+				seenIssues[issueKey] = true
+			}
+			seenIssuesMu.Unlock()
+
+			if !seen {
+				issueActivities = append(issueActivities, IssueActivity{
+					Label:     label,
+					Owner:     owner,
+					Repo:      repo,
+					Issue:     issue,
+					UpdatedAt: issue.GetUpdatedAt().Time,
+				})
+				totalFound++
+			}
+		}
+
+		if debugMode && totalFound > 0 {
+			fmt.Printf("  [%s] Complete: %d issues found\n", label, totalFound)
+		}
+
+		return issueActivities
+	}
+
+	// Original API-based implementation
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -1012,12 +1252,27 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			seenIssuesMu.Unlock()
 
 			if !seen {
+				// Check if issue has updates compared to cached version
+				hasUpdates := false
+				if db != nil {
+					cachedIssue, err := db.GetIssue(owner, repo, *issue.Number)
+					if err == nil {
+						// Compare timestamps - if API version is newer, mark as updated
+						if issue.GetUpdatedAt().After(cachedIssue.GetUpdatedAt().Time) {
+							hasUpdates = true
+						}
+					}
+					// Save issue to database
+					_ = db.SaveIssue(owner, repo, issue)
+				}
+
 				issueActivities = append(issueActivities, IssueActivity{
-					Label:     label,
-					Owner:     owner,
-					Repo:      repo,
-					Issue:     issue,
-					UpdatedAt: issue.GetUpdatedAt().Time,
+					Label:      label,
+					Owner:      owner,
+					Repo:       repo,
+					Issue:      issue,
+					UpdatedAt:  issue.GetUpdatedAt().Time,
+					HasUpdates: hasUpdates,
 				})
 				pageResults++
 				totalFound++
