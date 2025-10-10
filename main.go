@@ -670,9 +670,22 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 		return true
 	}
 
-	// Check PR comments for issue mentions (skip API call in local mode)
-	if !localMode {
-		prComments, _, err := client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
+	// Check PR comments for issue mentions
+	var prComments []*github.PullRequestComment
+	var err error
+
+	if localMode {
+		// Fetch comments from database in local mode
+		if db != nil {
+			prComments, err = db.GetPRComments(pr.Owner, pr.Repo, prNumber)
+			if err != nil && debugMode {
+				fmt.Printf("  Warning: Could not fetch comments from database for %s/%s#%d: %v\n",
+					pr.Owner, pr.Repo, prNumber, err)
+			}
+		}
+	} else {
+		// Fetch comments from GitHub API in online mode
+		prComments, _, err = client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
 			ListOptions: github.ListOptions{PerPage: 100},
 		})
 
@@ -682,16 +695,19 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 			progress.display()
 		}
 
-		if err == nil {
+		// Save comments to database for future local mode use
+		if err == nil && db != nil {
 			for _, comment := range prComments {
-				// Save PR comment to database
-				if db != nil {
-					_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment)
-				}
+				_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment)
+			}
+		}
+	}
 
-				if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
-					return true
-				}
+	// Check comments for issue mentions
+	if err == nil {
+		for _, comment := range prComments {
+			if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
+				return true
 			}
 		}
 	}

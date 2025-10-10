@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/go-github/v57/github"
@@ -238,6 +239,32 @@ func (d *Database) GetAllComments() ([]string, error) {
 			comments = append(comments, string(v))
 			return nil
 		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return comments, nil
+}
+
+// GetPRComments retrieves all PR review comments for a specific PR from the database
+func (d *Database) GetPRComments(owner, repo string, prNumber int) ([]*github.PullRequestComment, error) {
+	var comments []*github.PullRequestComment
+	prefix := fmt.Sprintf("%s/%s#%d/pr_review_comment/", owner, repo, prNumber)
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(commentsBucket)
+		c := b.Cursor()
+
+		// Seek to the prefix and iterate over matching keys
+		for k, v := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); k, v = c.Next() {
+			var comment github.PullRequestComment
+			if err := json.Unmarshal(v, &comment); err != nil {
+				return err
+			}
+			comments = append(comments, &comment)
+		}
+		return nil
 	})
 
 	if err != nil {
