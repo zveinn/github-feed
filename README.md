@@ -44,6 +44,7 @@ You can provide your token and username in three ways:
 ```bash
 export GITHUB_TOKEN="your_token_here"
 export GITHUB_USERNAME="your_username"
+export ALLOWED_REPOS="user/repo1,user/repo2"  # Optional: filter to specific repos
 ```
 
 **Option 2: Configuration File**
@@ -51,6 +52,7 @@ Create `.gitai.env` in the same directory as the gitai executable:
 ```bash
 GITHUB_TOKEN=your_token_here
 GITHUB_USERNAME=your_username
+ALLOWED_REPOS=user/repo1,user/repo2  # Optional: filter to specific repos
 ```
 
 **Option 3: Custom Configuration File**
@@ -76,8 +78,11 @@ gitai --debug
 # Use local database instead of GitHub API (offline mode)
 gitai --local
 
+# Filter to specific repositories only
+gitai --allowed-repos="user/repo1,user/repo2"
+
 # Combine flags
-gitai --local --closed --debug
+gitai --local --closed --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
 ```
 
 ### Command Line Options
@@ -88,6 +93,7 @@ gitai --local --closed --debug
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--env PATH` | Specify custom .env file path (default: .gitai.env in program directory) |
+| `--allowed-repos REPOS` | Filter to specific repositories (comma-separated: `user/repo1,user/repo2`) |
 
 ## Output Format
 

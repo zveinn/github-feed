@@ -182,6 +182,7 @@ func main() {
 	var debugMode bool
 	var localMode bool
 	var envPath string
+	var allowedReposFlag string
 
 	// Parse arguments
 	for i := 1; i < len(os.Args); i++ {
@@ -192,12 +193,24 @@ func main() {
 			debugMode = true
 		} else if arg == "--local" {
 			localMode = true
-		} else if arg == "--env" {
-			if i+1 < len(os.Args) {
+		} else if arg == "--env" || strings.HasPrefix(arg, "--env=") {
+			if strings.HasPrefix(arg, "--env=") {
+				envPath = strings.TrimPrefix(arg, "--env=")
+			} else if i+1 < len(os.Args) {
 				envPath = os.Args[i+1]
 				i++ // Skip next argument
 			} else {
 				fmt.Println("Error: --env requires a path argument")
+				os.Exit(1)
+			}
+		} else if arg == "--allowed-repos" || strings.HasPrefix(arg, "--allowed-repos=") {
+			if strings.HasPrefix(arg, "--allowed-repos=") {
+				allowedReposFlag = strings.TrimPrefix(arg, "--allowed-repos=")
+			} else if i+1 < len(os.Args) {
+				allowedReposFlag = os.Args[i+1]
+				i++ // Skip next argument
+			} else {
+				fmt.Println("Error: --allowed-repos requires a comma-separated list of repos")
 				os.Exit(1)
 			}
 		} else if !strings.HasPrefix(arg, "--") {
@@ -223,6 +236,29 @@ func main() {
 	username = os.Getenv("GITHUB_USERNAME")
 	if username == "" {
 		username = os.Getenv("GITHUB_USER")
+	}
+
+	// Parse allowed repositories whitelist
+	// Priority: command line flag > environment variable
+	allowedReposStr := allowedReposFlag
+	if allowedReposStr == "" {
+		allowedReposStr = os.Getenv("ALLOWED_REPOS")
+	}
+
+	// Parse comma-separated list into a map for fast lookup
+	var allowedRepos map[string]bool
+	if allowedReposStr != "" {
+		allowedRepos = make(map[string]bool)
+		repos := strings.Split(allowedReposStr, ",")
+		for _, repo := range repos {
+			repo = strings.TrimSpace(repo)
+			if repo != "" {
+				allowedRepos[repo] = true
+			}
+		}
+		if debugMode && len(allowedRepos) > 0 {
+			fmt.Printf("Filtering to allowed repositories: %v\n", allowedRepos)
+		}
 	}
 
 	// Open database in program directory
@@ -256,11 +292,12 @@ func main() {
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--closed] [--debug] [--local] [--env PATH] [username]")
+		fmt.Println("Usage: gitai [--closed] [--debug] [--local] [--env PATH] [--allowed-repos REPOS] [username]")
 		fmt.Println("  --closed: Include closed PRs/issues from the last month")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
 		fmt.Println("  --env PATH: Specify custom .env file path (default: .gitai.env in program directory)")
+		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
 		fmt.Println("Or add it to .gitai.env")
 		os.Exit(1)
@@ -276,7 +313,17 @@ func main() {
 		fmt.Println("Debug mode enabled")
 	}
 
-	fetchAndDisplayActivity(token, username, includeClosed, debugMode, localMode, db)
+	fetchAndDisplayActivity(token, username, includeClosed, debugMode, localMode, allowedRepos, db)
+}
+
+// isRepoAllowed checks if a repository is in the allowed list
+// If allowedRepos is nil or empty, all repos are allowed
+func isRepoAllowed(owner, repo string, allowedRepos map[string]bool) bool {
+	if allowedRepos == nil || len(allowedRepos) == 0 {
+		return true
+	}
+	repoKey := fmt.Sprintf("%s/%s", owner, repo)
+	return allowedRepos[repoKey]
 }
 
 func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) error {
@@ -321,7 +368,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMode bool, localMode bool, db *Database) {
+func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMode bool, localMode bool, allowedRepos map[string]bool, db *Database) {
 	startTime := time.Now()
 
 	ctx := context.Background()
@@ -402,7 +449,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		query := pq.query
 		label := pq.label
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, localMode, db)
+			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
@@ -412,7 +459,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	// Also run event collection in parallel (skip in local mode)
 	if !localMode {
 		prWg.Go(func() {
-			results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, db)
+			results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, allowedRepos, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
@@ -448,7 +495,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		query := iq.query
 		label := iq.label
 		issueWg.Go(func() {
-			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress, localMode, db)
+			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress, localMode, allowedRepos, db)
 			issuesMu.Lock()
 			issueActivities = append(issueActivities, results...)
 			issuesMu.Unlock()
@@ -762,7 +809,7 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, db *Database) []PRActivity {
+func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, allowedRepos map[string]bool, db *Database) []PRActivity {
 	// Fetch user's recent events to catch any PR activity
 	opts := &github.ListOptions{PerPage: 100}
 
@@ -809,6 +856,11 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 					continue
 				}
 				owner, repo := parts[0], parts[1]
+
+				// Apply repository whitelist filter
+				if !isRepoAllowed(owner, repo, allowedRepos) {
+					continue
+				}
 
 				// Try to extract PR number from the event payload
 				var prNumber int
@@ -892,7 +944,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, db *Database) []PRActivity {
+func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []PRActivity {
 	// In local mode, fetch from database instead of API
 	if localMode {
 		if db == nil {
@@ -925,6 +977,11 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 				continue
 			}
 			repo := repoParts[0]
+
+			// Apply repository whitelist filter
+			if !isRepoAllowed(owner, repo, allowedRepos) {
+				continue
+			}
 
 			prKey := key
 
@@ -1000,6 +1057,11 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			}
 			owner := parts[len(parts)-2]
 			repo := parts[len(parts)-1]
+
+			// Apply repository whitelist filter
+			if !isRepoAllowed(owner, repo, allowedRepos) {
+				continue
+			}
 
 			prKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
@@ -1134,7 +1196,7 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 	)
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, db *Database) []IssueActivity {
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []IssueActivity {
 	// In local mode, fetch from database instead of API
 	if localMode {
 		if db == nil {
@@ -1167,6 +1229,11 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 				continue
 			}
 			repo := repoParts[0]
+
+			// Apply repository whitelist filter
+			if !isRepoAllowed(owner, repo, allowedRepos) {
+				continue
+			}
 
 			issueKey := key
 
@@ -1241,6 +1308,11 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			}
 			owner := parts[len(parts)-2]
 			repo := parts[len(parts)-1]
+
+			// Apply repository whitelist filter
+			if !isRepoAllowed(owner, repo, allowedRepos) {
+				continue
+			}
 
 			issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
