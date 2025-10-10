@@ -179,7 +179,7 @@ func loadEnvFile(path string) error {
 func main() {
 	// Parse command line arguments
 	var username string
-	var months int = 6 // Default to 6 months
+	var months int = 1 // Default to 1 month
 	var debugMode bool
 	var localMode bool
 	var allowedReposFlag string

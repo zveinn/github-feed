@@ -9,7 +9,7 @@ A fast, colorful CLI tool for monitoring GitHub pull requests and issues across 
 - 📊 **Smart Cross-Referencing** - Automatically links related PRs and issues
 - ⚡ **Real-Time Progress Bar** - Visual feedback with color-coded completion status
 - 🔍 **Comprehensive Search** - Tracks authored, mentioned, assigned, commented, and reviewed items
-- 📅 **Time Filtering** - View items from the last 6 months (configurable with `--months`)
+- 📅 **Time Filtering** - View items from the last month by default (configurable with `--months`)
 - 🎯 **Organized Display** - Separates open, merged, and closed items into clear sections
 
 ## Installation
@@ -68,7 +68,7 @@ export ALLOWED_REPOS="user/repo1,user/repo2"  # Optional: filter to specific rep
 ### Basic Usage
 
 ```bash
-# Monitor PRs and issues from the last 6 months (default, fetches from GitHub)
+# Monitor PRs and issues from the last month (default, fetches from GitHub)
 gitai
 
 # Show items from the last 3 months
@@ -94,7 +94,7 @@ gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels
 
 | Flag | Description |
 |------|-------------|
-| `--months MONTHS` | Show items from the last X months, both open and closed (default: 6) |
+| `--months MONTHS` | Show items from the last X months, both open and closed (default: 1) |
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--allowed-repos REPOS` | Filter to specific repositories (comma-separated: `user/repo1,user/repo2`) |
@@ -144,7 +144,7 @@ gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels
 
 4. **Smart Filtering**:
    - Shows both open and closed items from the specified time period
-   - **Default**: Items updated in last 6 months
+   - **Default**: Items updated in last month
    - **Custom** (`--months X`): Items updated in last X months
 
 ### Offline Mode (`--local`)
