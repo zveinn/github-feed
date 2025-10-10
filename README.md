@@ -72,6 +72,9 @@ gitai
 # Include closed items from last month
 gitai --closed
 
+# Include closed items from last 3 months
+gitai --closed=3
+
 # Show detailed logging output
 gitai --debug
 
@@ -82,14 +85,14 @@ gitai --local
 gitai --allowed-repos="user/repo1,user/repo2"
 
 # Combine flags
-gitai --local --closed --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
+gitai --local --closed=6 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
 ```
 
 ### Command Line Options
 
 | Flag | Description |
 |------|-------------|
-| `--closed` | Include closed/merged PRs and issues from the last month |
+| `--closed[=MONTHS]` | Include closed/merged PRs and issues from the last X months (default: 1) |
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--env PATH` | Specify custom .env file path (default: .gitai.env in program directory) |
@@ -171,7 +174,7 @@ CLOSED ISSUES:
 
 4. **Smart Filtering**:
    - **Default mode**: Open items updated in last 6 months
-   - **Closed mode** (`--closed`): Closed/merged items from last month
+   - **Closed mode** (`--closed` or `--closed=X`): Closed/merged items from last X months (default: 1)
 
 ### Offline Mode (`--local`)
 

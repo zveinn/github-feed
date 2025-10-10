@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -178,7 +179,7 @@ func loadEnvFile(path string) error {
 func main() {
 	// Parse command line arguments first to get optional env path
 	var username string
-	var includeClosed bool
+	var closedMonths int
 	var debugMode bool
 	var localMode bool
 	var envPath string
@@ -187,8 +188,19 @@ func main() {
 	// Parse arguments
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
-		if arg == "--closed" {
-			includeClosed = true
+		if arg == "--closed" || strings.HasPrefix(arg, "--closed=") {
+			if strings.HasPrefix(arg, "--closed=") {
+				monthsStr := strings.TrimPrefix(arg, "--closed=")
+				months, err := strconv.Atoi(monthsStr)
+				if err != nil || months < 0 {
+					fmt.Println("Error: --closed must be a positive number (e.g., --closed=3)")
+					os.Exit(1)
+				}
+				closedMonths = months
+			} else {
+				// Default to 1 month if no value specified
+				closedMonths = 1
+			}
 		} else if arg == "--debug" {
 			debugMode = true
 		} else if arg == "--local" {
@@ -292,8 +304,8 @@ func main() {
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--closed] [--debug] [--local] [--env PATH] [--allowed-repos REPOS] [username]")
-		fmt.Println("  --closed: Include closed PRs/issues from the last month")
+		fmt.Println("Usage: gitai [--closed[=MONTHS]] [--debug] [--local] [--env PATH] [--allowed-repos REPOS] [username]")
+		fmt.Println("  --closed[=MONTHS]: Include closed PRs/issues from the last X months (default: 1)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
 		fmt.Println("  --env PATH: Specify custom .env file path (default: .gitai.env in program directory)")
@@ -305,15 +317,15 @@ func main() {
 
 	if debugMode {
 		fmt.Printf("Monitoring GitHub PR activity for user: %s\n", username)
-		if includeClosed {
-			fmt.Println("Including closed items from the last month")
+		if closedMonths > 0 {
+			fmt.Printf("Including closed items from the last %d month(s)\n", closedMonths)
 		}
 	}
 	if debugMode {
 		fmt.Println("Debug mode enabled")
 	}
 
-	fetchAndDisplayActivity(token, username, includeClosed, debugMode, localMode, allowedRepos, db)
+	fetchAndDisplayActivity(token, username, closedMonths, debugMode, localMode, allowedRepos, db)
 }
 
 // isRepoAllowed checks if a repository is in the allowed list
@@ -368,7 +380,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMode bool, localMode bool, allowedRepos map[string]bool, db *Database) {
+func fetchAndDisplayActivity(token, username string, closedMonths int, debugMode bool, localMode bool, allowedRepos map[string]bool, db *Database) {
 	startTime := time.Now()
 
 	ctx := context.Background()
@@ -403,16 +415,16 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 
 	// Calculate dates
 	sixMonthsAgo := time.Now().AddDate(0, -6, 0).Format("2006-01-02")
-	oneMonthAgo := time.Now().AddDate(0, -1, 0).Format("2006-01-02")
+	closedDate := time.Now().AddDate(0, -closedMonths, 0).Format("2006-01-02")
 
 	// Build state and date filters
 	var stateFilter, dateFilter string
-	if includeClosed {
-		// For closed items, show only from last month
+	if closedMonths > 0 {
+		// For closed items, show from specified months back
 		stateFilter = "" // No state filter - include both open and closed
-		dateFilter = fmt.Sprintf("updated:>=%s", oneMonthAgo)
+		dateFilter = fmt.Sprintf("updated:>=%s", closedDate)
 	} else {
-		// For open items, show from last year
+		// For open items only, show from last 6 months
 		stateFilter = "state:open"
 		dateFilter = fmt.Sprintf("updated:>=%s", sixMonthsAgo)
 	}
