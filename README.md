@@ -9,7 +9,7 @@ A fast, colorful CLI tool for monitoring GitHub pull requests and issues across 
 - 📊 **Smart Cross-Referencing** - Automatically links related PRs and issues
 - ⚡ **Real-Time Progress Bar** - Visual feedback with color-coded completion status
 - 🔍 **Comprehensive Search** - Tracks authored, mentioned, assigned, commented, and reviewed items
-- 📅 **Time Filtering** - View open items from the last 6 months or closed items from the last month
+- 📅 **Time Filtering** - View items from the last 6 months (configurable with `--months`)
 - 🎯 **Organized Display** - Separates open, merged, and closed items into clear sections
 
 ## Installation
@@ -17,13 +17,7 @@ A fast, colorful CLI tool for monitoring GitHub pull requests and issues across 
 ### Build from Source
 
 ```bash
-go build -o gitai main.go
-```
-
-### Move to PATH (Optional)
-
-```bash
-sudo mv gitai /usr/local/bin/
+go build -o github-feed .
 ```
 
 ## Configuration
@@ -97,37 +91,6 @@ gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--env PATH` | Specify custom .env file path (default: .env in program directory) |
 | `--allowed-repos REPOS` | Filter to specific repositories (comma-separated: `user/repo1,user/repo2`) |
-
-## Output Format
-
-### Pull Requests Display
-
-```
-OPEN PULL REQUESTS:
-------------------------------------------
-2025/10/09 AUTHORED zveinn minio/madmin-go#462 - making sort non-case sensitive
--- OPEN miniohq/ec#87 - variable isCopied is always a nil
-
-MERGED PULL REQUESTS:
-------------------------------------------
-2025/09/21 AUTHORED zveinn miniohq/ec#174 - isCopy is never set
-
-CLOSED PULL REQUESTS:
-------------------------------------------
-2025/08/12 COMMENTED user helix-editor/helix#12204 - feat: new option
-```
-
-### Issues Display
-
-```
-OPEN ISSUES:
-------------------------------------------
-2025/10/10 AUTHORED zveinn tunnels-is/tunnels#140 - Error finding default route
-
-CLOSED ISSUES:
-------------------------------------------
-2025/09/29 ASSIGNED user miniohq/eos#1688 - config: resolveconfigparam
-```
 
 ### Color Coding
 
@@ -209,7 +172,7 @@ Your terminal may not support ANSI colors properly. Use `--debug` mode for plain
 ### No results showing
 - Verify your username is correct
 - Check that you have activity in the last 6 months
-- Try with `--closed` to see closed items
+- Try increasing the time range with `--months 12`
 
 ## Development
 
