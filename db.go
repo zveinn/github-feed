@@ -54,18 +54,31 @@ func (d *Database) Close() error {
 }
 
 // SavePullRequest saves or updates a pull request in the database
-func (d *Database) SavePullRequest(owner, repo string, pr *github.PullRequest) error {
+func (d *Database) SavePullRequest(owner, repo string, pr *github.PullRequest, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, pr.GetNumber())
 
 	data, err := json.Marshal(pr)
 	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error marshaling PR %s: %v\n", key, err)
+		}
 		return fmt.Errorf("failed to marshal PR: %w", err)
 	}
 
-	return d.db.Update(func(tx *bolt.Tx) error {
+	err = d.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(pullRequestsBucket)
 		return b.Put([]byte(key), data)
 	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error saving PR %s: %v\n", key, err)
+		}
+	} else if debugMode {
+		fmt.Printf("  [DB] Saved PR %s\n", key)
+	}
+
+	return err
 }
 
 // GetPullRequest retrieves a pull request from the database
@@ -89,18 +102,31 @@ func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullR
 }
 
 // SaveIssue saves or updates an issue in the database
-func (d *Database) SaveIssue(owner, repo string, issue *github.Issue) error {
+func (d *Database) SaveIssue(owner, repo string, issue *github.Issue, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, issue.GetNumber())
 
 	data, err := json.Marshal(issue)
 	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error marshaling issue %s: %v\n", key, err)
+		}
 		return fmt.Errorf("failed to marshal issue: %w", err)
 	}
 
-	return d.db.Update(func(tx *bolt.Tx) error {
+	err = d.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(issuesBucket)
 		return b.Put([]byte(key), data)
 	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error saving issue %s: %v\n", key, err)
+		}
+	} else if debugMode {
+		fmt.Printf("  [DB] Saved issue %s\n", key)
+	}
+
+	return err
 }
 
 // GetIssue retrieves an issue from the database
@@ -140,18 +166,31 @@ func (d *Database) SaveComment(owner, repo string, itemNumber int, comment *gith
 }
 
 // SavePRComment saves or updates a PR review comment in the database
-func (d *Database) SavePRComment(owner, repo string, prNumber int, comment *github.PullRequestComment) error {
+func (d *Database) SavePRComment(owner, repo string, prNumber int, comment *github.PullRequestComment, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d/pr_review_comment/%d", owner, repo, prNumber, comment.GetID())
 
 	data, err := json.Marshal(comment)
 	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error marshaling PR comment %s: %v\n", key, err)
+		}
 		return fmt.Errorf("failed to marshal PR comment: %w", err)
 	}
 
-	return d.db.Update(func(tx *bolt.Tx) error {
+	err = d.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(commentsBucket)
 		return b.Put([]byte(key), data)
 	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error saving PR comment %s: %v\n", key, err)
+		}
+	} else if debugMode {
+		fmt.Printf("  [DB] Saved PR comment %s\n", key)
+	}
+
+	return err
 }
 
 // GetComment retrieves a comment from the database
@@ -186,14 +225,21 @@ func (d *Database) Stats() (prCount, issueCount, commentCount int, err error) {
 }
 
 // GetAllPullRequests retrieves all pull requests from the database
-func (d *Database) GetAllPullRequests() (map[string]*github.PullRequest, error) {
+func (d *Database) GetAllPullRequests(debugMode bool) (map[string]*github.PullRequest, error) {
 	prs := make(map[string]*github.PullRequest)
+
+	if debugMode {
+		fmt.Printf("  [DB] Reading all PRs from database...\n")
+	}
 
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(pullRequestsBucket)
 		return b.ForEach(func(k, v []byte) error {
 			var pr github.PullRequest
 			if err := json.Unmarshal(v, &pr); err != nil {
+				if debugMode {
+					fmt.Printf("  [DB] Error unmarshaling PR %s: %v\n", string(k), err)
+				}
 				return err
 			}
 			prs[string(k)] = &pr
@@ -202,20 +248,35 @@ func (d *Database) GetAllPullRequests() (map[string]*github.PullRequest, error) 
 	})
 
 	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error reading PRs: %v\n", err)
+		}
 		return nil, err
 	}
+
+	if debugMode {
+		fmt.Printf("  [DB] Loaded %d PRs from database\n", len(prs))
+	}
+
 	return prs, nil
 }
 
 // GetAllIssues retrieves all issues from the database
-func (d *Database) GetAllIssues() (map[string]*github.Issue, error) {
+func (d *Database) GetAllIssues(debugMode bool) (map[string]*github.Issue, error) {
 	issues := make(map[string]*github.Issue)
+
+	if debugMode {
+		fmt.Printf("  [DB] Reading all issues from database...\n")
+	}
 
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(issuesBucket)
 		return b.ForEach(func(k, v []byte) error {
 			var issue github.Issue
 			if err := json.Unmarshal(v, &issue); err != nil {
+				if debugMode {
+					fmt.Printf("  [DB] Error unmarshaling issue %s: %v\n", string(k), err)
+				}
 				return err
 			}
 			issues[string(k)] = &issue
@@ -224,8 +285,16 @@ func (d *Database) GetAllIssues() (map[string]*github.Issue, error) {
 	})
 
 	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error reading issues: %v\n", err)
+		}
 		return nil, err
 	}
+
+	if debugMode {
+		fmt.Printf("  [DB] Loaded %d issues from database\n", len(issues))
+	}
+
 	return issues, nil
 }
 
