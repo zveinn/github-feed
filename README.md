@@ -47,10 +47,16 @@ export GITHUB_USERNAME="your_username"
 ```
 
 **Option 2: Configuration File**
-Create `~/.secret/.gitai.env`:
+Create `.gitai.env` in the same directory as the gitai executable:
 ```bash
 GITHUB_TOKEN=your_token_here
 GITHUB_USERNAME=your_username
+```
+
+**Option 3: Custom Configuration File**
+Use the `--env` flag to specify a custom path:
+```bash
+gitai --env /path/to/custom/.env
 ```
 
 ## Usage
@@ -74,6 +80,7 @@ gitai --debug
 |------|-------------|
 | `--closed` | Include closed/merged PRs and issues from the last month |
 | `--debug` | Show detailed API call progress instead of progress bar |
+| `--env PATH` | Specify custom .env file path (default: .gitai.env in program directory) |
 
 ## Output Format
 
@@ -176,8 +183,10 @@ Your terminal may not support ANSI colors properly. Use `--debug` mode for plain
 ```
 gitai/
 ├── main.go           # Main application code
+├── db.go             # Database operations for caching GitHub data
 ├── README.md         # This file
-└── .gitai.env        # Optional config file (in ~/.secret/)
+├── .gitai.env        # Optional config file (in program directory)
+└── gitai.db          # BBolt database for caching (auto-created)
 ```
 
 ## License

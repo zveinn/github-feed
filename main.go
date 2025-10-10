@@ -174,10 +174,61 @@ func loadEnvFile(path string) error {
 }
 
 func main() {
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		envPath := filepath.Join(homeDir, ".secret", ".gitai.env")
-		_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
+	// Parse command line arguments first to get optional env path
+	var username string
+	var includeClosed bool
+	var debugMode bool
+	var envPath string
+
+	// Get username from command line or environment
+	username = os.Getenv("GITHUB_USERNAME")
+	if username == "" {
+		username = os.Getenv("GITHUB_USER")
+	}
+
+	// Parse arguments
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if arg == "--closed" {
+			includeClosed = true
+		} else if arg == "--debug" {
+			debugMode = true
+		} else if arg == "--env" {
+			if i+1 < len(os.Args) {
+				envPath = os.Args[i+1]
+				i++ // Skip next argument
+			} else {
+				fmt.Println("Error: --env requires a path argument")
+				os.Exit(1)
+			}
+		} else if !strings.HasPrefix(arg, "--") {
+			username = arg
+		}
+	}
+
+	// Get executable directory for default paths
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("Warning: Could not determine executable path: %v\n", err)
+		exePath = "."
+	}
+	exeDir := filepath.Dir(exePath)
+
+	// Load .env file from specified path or default to program directory
+	if envPath == "" {
+		envPath = filepath.Join(exeDir, ".gitai.env")
+	}
+	_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
+
+	// Open database in program directory
+	dbPath := filepath.Join(exeDir, "gitai.db")
+	db, err := OpenDatabase(dbPath)
+	if err != nil {
+		fmt.Printf("Warning: Failed to open database: %v\n", err)
+		fmt.Println("Continuing without database caching...")
+		db = nil
+	} else {
+		defer db.Close()
 	}
 
 	// Get GitHub token from environment (try both variable names)
@@ -193,40 +244,18 @@ func main() {
 		fmt.Println("3. Give it a name and select these scopes: 'repo', 'read:org'")
 		fmt.Println("4. Generate and copy the token")
 		fmt.Println("5. Export it: export GITHUB_TOKEN=your_token_here")
-		fmt.Println("6. Or add it to ~/.secret/.gitai.env")
+		fmt.Println("6. Or add it to .gitai.env in the program directory")
 		os.Exit(1)
-	}
-
-	// Parse command line arguments
-	var username string
-	var includeClosed bool
-	var debugMode bool
-
-	// Get username from command line or environment
-	username = os.Getenv("GITHUB_USERNAME")
-	if username == "" {
-		username = os.Getenv("GITHUB_USER")
-	}
-
-	// Parse arguments
-	for i := 1; i < len(os.Args); i++ {
-		arg := os.Args[i]
-		if arg == "--closed" {
-			includeClosed = true
-		} else if arg == "--debug" {
-			debugMode = true
-		} else if !strings.HasPrefix(arg, "--") {
-			username = arg
-		}
 	}
 
 	if username == "" {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--closed] [--debug] <username>")
+		fmt.Println("Usage: gitai [--closed] [--debug] [--env PATH] [username]")
 		fmt.Println("  --closed: Include closed PRs/issues from the last month")
 		fmt.Println("  --debug: Show detailed API progress")
+		fmt.Println("  --env PATH: Specify custom .env file path (default: .gitai.env in program directory)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
-		fmt.Println("Or add it to ~/.secret/.gitai.env")
+		fmt.Println("Or add it to .gitai.env")
 		os.Exit(1)
 	}
 
@@ -240,7 +269,7 @@ func main() {
 		fmt.Println("Debug mode enabled")
 	}
 
-	fetchAndDisplayActivity(token, username, includeClosed, debugMode)
+	fetchAndDisplayActivity(token, username, includeClosed, debugMode, db)
 }
 
 func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) error {
@@ -285,7 +314,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMode bool) {
+func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMode bool, db *Database) {
 	startTime := time.Now()
 	ctx := context.Background()
 	client := github.NewClient(nil).WithAuthToken(token)
@@ -363,7 +392,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		query := pq.query
 		label := pq.label
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress)
+			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
@@ -372,7 +401,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 
 	// Also run event collection in parallel
 	prWg.Go(func() {
-		results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress)
+		results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, db)
 		activitiesMu.Lock()
 		activities = append(activities, results...)
 		activitiesMu.Unlock()
@@ -407,7 +436,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		query := iq.query
 		label := iq.label
 		issueWg.Go(func() {
-			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress)
+			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress, db)
 			issuesMu.Lock()
 			issueActivities = append(issueActivities, results...)
 			issuesMu.Unlock()
@@ -455,7 +484,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 			// Only check PRs in the same repo and same owner
 			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
 				wg.Go(func() {
-					if areCrossReferenced(ctx, client, pr, issue, debugMode, progress) {
+					if areCrossReferenced(ctx, client, pr, issue, debugMode, progress, db) {
 						pr.Issues = append(pr.Issues, *issue)
 						linkedIssues[issueKey] = true
 						if debugMode {
@@ -485,6 +514,14 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println()
 		fmt.Printf("Total fetch time: %v\n", duration.Round(time.Millisecond))
 		fmt.Printf("Found %d unique PRs and %d unique issues\n", len(activities), len(issueActivities))
+
+		// Show database statistics
+		if db != nil {
+			prCount, issueCount, commentCount, err := db.Stats()
+			if err == nil {
+				fmt.Printf("Database stats: %d PRs, %d issues, %d comments\n", prCount, issueCount, commentCount)
+			}
+		}
 		fmt.Println()
 	} else {
 		// Clear progress bar and add newline
@@ -601,7 +638,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	}
 }
 
-func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity, debugMode bool, progress *Progress) bool {
+func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity, debugMode bool, progress *Progress, db *Database) bool {
 	prNumber := pr.PR.GetNumber()
 	issueNumber := issue.Issue.GetNumber()
 
@@ -636,6 +673,11 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 
 	if err == nil {
 		for _, comment := range prComments {
+			// Save PR comment to database
+			if db != nil {
+				_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment)
+			}
+
 			if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
 				return true
 			}
@@ -690,7 +732,7 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
+func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, db *Database) []PRActivity {
 	// Fetch user's recent events to catch any PR activity
 	opts := &github.ListOptions{PerPage: 100}
 
@@ -775,6 +817,11 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 							continue
 						}
 
+						// Save PR to database
+						if db != nil {
+							_ = db.SavePullRequest(owner, repo, pr)
+						}
+
 						activities = append(activities, PRActivity{
 							Label:     "Recent Activity",
 							Owner:     owner,
@@ -805,7 +852,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
+func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, db *Database) []PRActivity {
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -877,6 +924,11 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 						User:      issue.User,
 						HTMLURL:   issue.HTMLURL,
 					}
+				}
+
+				// Save PR to database
+				if db != nil {
+					_ = db.SavePullRequest(owner, repo, pr)
 				}
 
 				activities = append(activities, PRActivity{
@@ -956,7 +1008,7 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	)
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress) []IssueActivity {
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress, db *Database) []IssueActivity {
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -1012,6 +1064,11 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			seenIssuesMu.Unlock()
 
 			if !seen {
+				// Save issue to database
+				if db != nil {
+					_ = db.SaveIssue(owner, repo, issue)
+				}
+
 				issueActivities = append(issueActivities, IssueActivity{
 					Label:     label,
 					Owner:     owner,
