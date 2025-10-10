@@ -249,7 +249,7 @@ func main() {
 
 	// Load .env file from specified path or default to program directory
 	if envPath == "" {
-		envPath = filepath.Join(exeDir, ".gitai.env")
+		envPath = filepath.Join(exeDir, ".env")
 	}
 	_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
 
@@ -283,7 +283,7 @@ func main() {
 	}
 
 	// Open database in program directory
-	dbPath := filepath.Join(exeDir, "gitai.db")
+	dbPath := filepath.Join(exeDir, "github.db")
 	db, err := OpenDatabase(dbPath)
 	if err != nil {
 		fmt.Printf("Warning: Failed to open database: %v\n", err)
@@ -307,7 +307,7 @@ func main() {
 		fmt.Println("3. Give it a name and select these scopes: 'repo', 'read:org'")
 		fmt.Println("4. Generate and copy the token")
 		fmt.Println("5. Export it: export GITHUB_TOKEN=your_token_here")
-		fmt.Println("6. Or add it to .gitai.env in the program directory")
+		fmt.Println("6. Or add it to .env in the program directory")
 		os.Exit(1)
 	}
 
@@ -317,10 +317,10 @@ func main() {
 		fmt.Println("  --months MONTHS: Show items from the last X months (default: 6)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
-		fmt.Println("  --env PATH: Specify custom .env file path (default: .gitai.env in program directory)")
+		fmt.Println("  --env PATH: Specify custom .env file path (default: .env in program directory)")
 		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
-		fmt.Println("Or add it to .gitai.env")
+		fmt.Println("Or add it to .env")
 		os.Exit(1)
 	}
 

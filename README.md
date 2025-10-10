@@ -48,7 +48,7 @@ export ALLOWED_REPOS="user/repo1,user/repo2"  # Optional: filter to specific rep
 ```
 
 **Option 2: Configuration File**
-Create `.gitai.env` in the same directory as the gitai executable:
+Create `.env` in the same directory as the gitai executable:
 ```bash
 GITHUB_TOKEN=your_token_here
 GITHUB_USERNAME=your_username
@@ -95,7 +95,7 @@ gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels
 | `--months MONTHS` | Show items from the last X months, both open and closed (default: 6) |
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
-| `--env PATH` | Specify custom .env file path (default: .gitai.env in program directory) |
+| `--env PATH` | Specify custom .env file path (default: .env in program directory) |
 | `--allowed-repos REPOS` | Filter to specific repositories (comma-separated: `user/repo1,user/repo2`) |
 
 ## Output Format
@@ -162,7 +162,7 @@ CLOSED ISSUES:
    - Your recent activity events
    - Issues you authored/mentioned/assigned/commented
 
-2. **Local Caching** - All fetched data is automatically saved to a local BBolt database (`gitai.db`)
+2. **Local Caching** - All fetched data is automatically saved to a local BBolt database (`github.db`)
    - PRs, issues, and comments are cached for offline access
    - Each item is stored/updated with a unique key
    - Database grows as you fetch more data
@@ -219,8 +219,8 @@ gitai/
 ├── main.go           # Main application code
 ├── db.go             # Database operations for caching GitHub data
 ├── README.md         # This file
-├── .gitai.env        # Optional config file (in program directory)
-└── gitai.db          # BBolt database for caching (auto-created)
+├── .env              # Optional config file (in program directory)
+└── github.db         # BBolt database for caching (auto-created)
 ```
 
 ## License
