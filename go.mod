@@ -1,4 +1,4 @@
-module github.com/sveinn/gitai
+module github.com/sveinn/github-feed
 
 go 1.25
 
