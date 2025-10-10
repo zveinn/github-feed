@@ -18,21 +18,23 @@ import (
 
 // PRActivity represents a PR with its activity metadata
 type PRActivity struct {
-	Label     string
-	Owner     string
-	Repo      string
-	PR        *github.PullRequest
-	UpdatedAt time.Time
-	Issues    []IssueActivity // Related issues linked to this PR
+	Label      string
+	Owner      string
+	Repo       string
+	PR         *github.PullRequest
+	UpdatedAt  time.Time
+	HasUpdates bool            // True if API version is newer than cached version
+	Issues     []IssueActivity // Related issues linked to this PR
 }
 
 // IssueActivity represents an issue with its activity metadata
 type IssueActivity struct {
-	Label     string
-	Owner     string
-	Repo      string
-	Issue     *github.Issue
-	UpdatedAt time.Time
+	Label      string
+	Owner      string
+	Repo       string
+	Issue      *github.Issue
+	UpdatedAt  time.Time
+	HasUpdates bool // True if API version is newer than cached version
 }
 
 // Progress tracks API call progress
@@ -581,11 +583,11 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("OPEN PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range openPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -598,11 +600,11 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("MERGED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range mergedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -615,11 +617,11 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("CLOSED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range closedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -632,7 +634,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("OPEN ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range openIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
 		}
 	}
 
@@ -643,7 +645,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Println(titleColor.Sprint("CLOSED ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range closedIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
 		}
 	}
 }
@@ -845,17 +847,27 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 							continue
 						}
 
-						// Save PR to database
+						// Check if PR has updates compared to cached version
+						hasUpdates := false
 						if db != nil {
+							cachedPR, err := db.GetPullRequest(owner, repo, prNumber)
+							if err == nil {
+								// Compare timestamps - if API version is newer, mark as updated
+								if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
+									hasUpdates = true
+								}
+							}
+							// Save PR to database
 							_ = db.SavePullRequest(owner, repo, pr)
 						}
 
 						activities = append(activities, PRActivity{
-							Label:     "Recent Activity",
-							Owner:     owner,
-							Repo:      repo,
-							PR:        pr,
-							UpdatedAt: pr.GetUpdatedAt().Time,
+							Label:      "Recent Activity",
+							Owner:      owner,
+							Repo:       repo,
+							PR:         pr,
+							UpdatedAt:  pr.GetUpdatedAt().Time,
+							HasUpdates: hasUpdates,
 						})
 						totalPRs++
 					}
@@ -1016,17 +1028,27 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 					}
 				}
 
-				// Save PR to database
+				// Check if PR has updates compared to cached version
+				hasUpdates := false
 				if db != nil {
+					cachedPR, err := db.GetPullRequest(owner, repo, *issue.Number)
+					if err == nil {
+						// Compare timestamps - if API version is newer, mark as updated
+						if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
+							hasUpdates = true
+						}
+					}
+					// Save PR to database
 					_ = db.SavePullRequest(owner, repo, pr)
 				}
 
 				activities = append(activities, PRActivity{
-					Label:     label,
-					Owner:     owner,
-					Repo:      repo,
-					PR:        pr,
-					UpdatedAt: pr.GetUpdatedAt().Time,
+					Label:      label,
+					Owner:      owner,
+					Repo:       repo,
+					PR:         pr,
+					UpdatedAt:  pr.GetUpdatedAt().Time,
+					HasUpdates: hasUpdates,
 				})
 				pageResults++
 				totalFound++
@@ -1052,7 +1074,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 	return activities
 }
 
-func displayPR(label, owner, repo string, pr *github.PullRequest) {
+func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool) {
 	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if pr.UpdatedAt != nil {
@@ -1062,7 +1084,14 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(pr.User.GetLogin())
 
-	fmt.Printf("%s %s %s %s/%s#%d - %s\n",
+	// Add update icon if item has updates
+	updateIcon := ""
+	if hasUpdates {
+		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
+	}
+
+	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
+		updateIcon,
 		dateStr,
 		labelColor.Sprint(strings.ToUpper(label)),
 		userColor.Sprint(pr.User.GetLogin()),
@@ -1071,7 +1100,7 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 	)
 }
 
-func displayIssue(label, owner, repo string, issue *github.Issue, indented bool) {
+func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool) {
 	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if issue.UpdatedAt != nil {
@@ -1088,7 +1117,14 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(issue.User.GetLogin())
 
-	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
+	// Add update icon if item has updates
+	updateIcon := ""
+	if hasUpdates {
+		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
+	}
+
+	fmt.Printf("%s%s%s %s %s %s/%s#%d - %s\n",
+		updateIcon,
 		indent,
 		dateStr,
 		labelColor.Sprint(strings.ToUpper(label)),
@@ -1216,17 +1252,27 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			seenIssuesMu.Unlock()
 
 			if !seen {
-				// Save issue to database
+				// Check if issue has updates compared to cached version
+				hasUpdates := false
 				if db != nil {
+					cachedIssue, err := db.GetIssue(owner, repo, *issue.Number)
+					if err == nil {
+						// Compare timestamps - if API version is newer, mark as updated
+						if issue.GetUpdatedAt().After(cachedIssue.GetUpdatedAt().Time) {
+							hasUpdates = true
+						}
+					}
+					// Save issue to database
 					_ = db.SaveIssue(owner, repo, issue)
 				}
 
 				issueActivities = append(issueActivities, IssueActivity{
-					Label:     label,
-					Owner:     owner,
-					Repo:      repo,
-					Issue:     issue,
-					UpdatedAt: issue.GetUpdatedAt().Time,
+					Label:      label,
+					Owner:      owner,
+					Repo:       repo,
+					Issue:      issue,
+					UpdatedAt:  issue.GetUpdatedAt().Time,
+					HasUpdates: hasUpdates,
 				})
 				pageResults++
 				totalFound++
