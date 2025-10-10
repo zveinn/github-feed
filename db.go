@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -23,9 +24,15 @@ type Database struct {
 
 // OpenDatabase opens or creates the bbolt database
 func OpenDatabase(path string) (*Database, error) {
-	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: 1 * time.Second})
+	db, err := bolt.Open(path, 0666, &bolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Ensure the database file has full access permissions (0666)
+	if err := os.Chmod(path, 0666); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set database permissions: %w", err)
 	}
 
 	// Create buckets if they don't exist
