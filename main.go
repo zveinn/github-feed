@@ -180,12 +180,6 @@ func main() {
 	var debugMode bool
 	var envPath string
 
-	// Get username from command line or environment
-	username = os.Getenv("GITHUB_USERNAME")
-	if username == "" {
-		username = os.Getenv("GITHUB_USER")
-	}
-
 	// Parse arguments
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -219,6 +213,12 @@ func main() {
 		envPath = filepath.Join(exeDir, ".gitai.env")
 	}
 	_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
+
+	// Get username from command line or environment
+	username = os.Getenv("GITHUB_USERNAME")
+	if username == "" {
+		username = os.Getenv("GITHUB_USER")
+	}
 
 	// Open database in program directory
 	dbPath := filepath.Join(exeDir, "gitai.db")
