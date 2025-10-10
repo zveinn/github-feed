@@ -66,14 +66,14 @@ gitai --env /path/to/custom/.env
 ### Basic Usage
 
 ```bash
-# Monitor open PRs and issues for the last 6 months (fetches from GitHub)
+# Monitor PRs and issues from the last 6 months (default, fetches from GitHub)
 gitai
 
-# Include closed items from last month
-gitai --closed
+# Show items from the last 3 months
+gitai --months 3
 
-# Include closed items from last 3 months
-gitai --closed=3
+# Show items from the last 12 months
+gitai --months=12
 
 # Show detailed logging output
 gitai --debug
@@ -85,14 +85,14 @@ gitai --local
 gitai --allowed-repos="user/repo1,user/repo2"
 
 # Combine flags
-gitai --local --closed=6 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
+gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
 ```
 
 ### Command Line Options
 
 | Flag | Description |
 |------|-------------|
-| `--closed[=MONTHS]` | Include closed/merged PRs and issues from the last X months (default: 1) |
+| `--months MONTHS` | Show items from the last X months, both open and closed (default: 6) |
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--env PATH` | Specify custom .env file path (default: .gitai.env in program directory) |
@@ -173,8 +173,9 @@ CLOSED ISSUES:
    - Displaying linked issues directly under their related PRs
 
 4. **Smart Filtering**:
-   - **Default mode**: Open items updated in last 6 months
-   - **Closed mode** (`--closed` or `--closed=X`): Closed/merged items from last X months (default: 1)
+   - Shows both open and closed items from the specified time period
+   - **Default**: Items updated in last 6 months
+   - **Custom** (`--months X`): Items updated in last X months
 
 ### Offline Mode (`--local`)
 
