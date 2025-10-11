@@ -83,11 +83,14 @@ github-feed --debug
 # Use local database instead of GitHub API (offline mode)
 github-feed --local
 
+# Show hyperlinks underneath each PR/issue
+github-feed --links
+
 # Filter to specific repositories only
 github-feed --allowed-repos="user/repo1,user/repo2"
 
 # Combine flags
-github-feed --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
+github-feed --local --months 12 --debug --links --allowed-repos="miniohq/ec,tunnels-is/tunnels"
 ```
 
 ### Command Line Options
@@ -97,6 +100,7 @@ github-feed --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/t
 | `--months MONTHS` | Show items from the last X months, both open and closed (default: 1) |
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
+| `--links` | Show hyperlinks (with 🔗 icon) underneath each PR and issue |
 | `--allowed-repos REPOS` | Filter to specific repositories (comma-separated: `user/repo1,user/repo2`) |
 
 ### Color Coding
