@@ -182,6 +182,7 @@ func main() {
 	var months int = 1 // Default to 1 month
 	var debugMode bool
 	var localMode bool
+	var showLinks bool
 	var allowedReposFlag string
 
 	// Parse arguments
@@ -213,6 +214,8 @@ func main() {
 			debugMode = true
 		} else if arg == "--local" {
 			localMode = true
+		} else if arg == "--links" {
+			showLinks = true
 		} else if arg == "--allowed-repos" || strings.HasPrefix(arg, "--allowed-repos=") {
 			if strings.HasPrefix(arg, "--allowed-repos=") {
 				allowedReposFlag = strings.TrimPrefix(arg, "--allowed-repos=")
@@ -328,10 +331,11 @@ ALLOWED_REPOS=
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--months MONTHS] [--debug] [--local] [--allowed-repos REPOS] [username]")
-		fmt.Println("  --months MONTHS: Show items from the last X months (default: 6)")
+		fmt.Println("Usage: gitai [--months MONTHS] [--debug] [--local] [--links] [--allowed-repos REPOS] [username]")
+		fmt.Println("  --months MONTHS: Show items from the last X months (default: 1)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
+		fmt.Println("  --links: Show hyperlinks underneath each PR/issue")
 		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
 		fmt.Printf("Or add it to %s\n", envPath)
@@ -346,7 +350,7 @@ ALLOWED_REPOS=
 		fmt.Println("Debug mode enabled")
 	}
 
-	fetchAndDisplayActivity(token, username, months, debugMode, localMode, allowedRepos, db)
+	fetchAndDisplayActivity(token, username, months, debugMode, localMode, showLinks, allowedRepos, db)
 }
 
 // isRepoAllowed checks if a repository is in the allowed list
@@ -401,7 +405,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string, months int, debugMode bool, localMode bool, allowedRepos map[string]bool, db *Database) {
+func fetchAndDisplayActivity(token, username string, months int, debugMode bool, localMode bool, showLinks bool, allowedRepos map[string]bool, db *Database) {
 	startTime := time.Now()
 
 	ctx := context.Background()
@@ -640,11 +644,11 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 		fmt.Println(titleColor.Sprint("OPEN PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range openPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
 				}
 			}
 		}
@@ -657,11 +661,11 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 		fmt.Println(titleColor.Sprint("MERGED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range mergedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
 				}
 			}
 		}
@@ -674,11 +678,11 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 		fmt.Println(titleColor.Sprint("CLOSED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range closedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
 				}
 			}
 		}
@@ -691,7 +695,7 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 		fmt.Println(titleColor.Sprint("OPEN ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range openIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates, showLinks)
 		}
 	}
 
@@ -702,7 +706,7 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 		fmt.Println(titleColor.Sprint("CLOSED ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range closedIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates, showLinks)
 		}
 	}
 }
@@ -1200,7 +1204,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 	return activities
 }
 
-func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool) {
+func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool, showLinks bool) {
 	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if pr.UpdatedAt != nil {
@@ -1224,9 +1228,14 @@ func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates boo
 		owner, repo, *pr.Number,
 		*pr.Title,
 	)
+
+	// Show link if --links flag is set
+	if showLinks && pr.HTMLURL != nil {
+		fmt.Printf("   🔗 %s\n", *pr.HTMLURL)
+	}
 }
 
-func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool) {
+func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool, showLinks bool) {
 	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if issue.UpdatedAt != nil {
@@ -1234,10 +1243,12 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 	}
 
 	indent := ""
+	linkIndent := "   "
 	if indented {
 		state := strings.ToUpper(*issue.State)
 		stateColor := getStateColor(*issue.State)
 		indent = fmt.Sprintf("-- %s ", stateColor.Sprint(state))
+		linkIndent = "      "
 	}
 
 	labelColor := getLabelColor(label)
@@ -1258,6 +1269,11 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 		owner, repo, *issue.Number,
 		*issue.Title,
 	)
+
+	// Show link if --links flag is set
+	if showLinks && issue.HTMLURL != nil {
+		fmt.Printf("%s🔗 %s\n", linkIndent, *issue.HTMLURL)
+	}
 }
 
 func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []IssueActivity {
