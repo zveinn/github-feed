@@ -69,25 +69,25 @@ export ALLOWED_REPOS="user/repo1,user/repo2"  # Optional: filter to specific rep
 
 ```bash
 # Monitor PRs and issues from the last month (default, fetches from GitHub)
-gitai
+github-feed
 
 # Show items from the last 3 months
-gitai --months 3
+github-feed --months 3
 
 # Show items from the last 12 months
-gitai --months=12
+github-feed --months=12
 
 # Show detailed logging output
-gitai --debug
+github-feed --debug
 
 # Use local database instead of GitHub API (offline mode)
-gitai --local
+github-feed --local
 
 # Filter to specific repositories only
-gitai --allowed-repos="user/repo1,user/repo2"
+github-feed --allowed-repos="user/repo1,user/repo2"
 
 # Combine flags
-gitai --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
+github-feed --local --months 12 --debug --allowed-repos="miniohq/ec,tunnels-is/tunnels"
 ```
 
 ### Command Line Options
