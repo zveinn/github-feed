@@ -17,25 +17,21 @@ var (
 	commentsBucket     = []byte("comments")
 )
 
-// Database wraps bbolt database operations
 type Database struct {
 	db *bolt.DB
 }
 
-// OpenDatabase opens or creates the bbolt database
 func OpenDatabase(path string) (*Database, error) {
 	db, err := bolt.Open(path, 0666, &bolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Ensure the database file has full access permissions (0666)
 	if err := os.Chmod(path, 0666); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to set database permissions: %w", err)
 	}
 
-	// Create buckets if they don't exist
 	err = db.Update(func(tx *bolt.Tx) error {
 		buckets := [][]byte{pullRequestsBucket, issuesBucket, commentsBucket}
 		for _, bucket := range buckets {
@@ -55,18 +51,15 @@ func OpenDatabase(path string) (*Database, error) {
 	return &Database{db: db}, nil
 }
 
-// Close closes the database
 func (d *Database) Close() error {
 	return d.db.Close()
 }
 
-// PRWithLabel wraps a PullRequest with its activity label
 type PRWithLabel struct {
 	PR    *github.PullRequest
 	Label string
 }
 
-// SavePullRequest saves or updates a pull request in the database
 func (d *Database) SavePullRequest(owner, repo string, pr *github.PullRequest, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, pr.GetNumber())
 
@@ -94,7 +87,6 @@ func (d *Database) SavePullRequest(owner, repo string, pr *github.PullRequest, d
 	return err
 }
 
-// SavePullRequestWithLabel saves or updates a pull request with its label in the database
 func (d *Database) SavePullRequestWithLabel(owner, repo string, pr *github.PullRequest, label string, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, pr.GetNumber())
 
@@ -127,7 +119,6 @@ func (d *Database) SavePullRequestWithLabel(owner, repo string, pr *github.PullR
 	return err
 }
 
-// GetPullRequest retrieves a pull request from the database
 func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullRequest, error) {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 
@@ -139,14 +130,12 @@ func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullR
 			return fmt.Errorf("PR not found")
 		}
 
-		// Try to unmarshal as PRWithLabel first (new format)
 		var prWithLabel PRWithLabel
 		if err := json.Unmarshal(data, &prWithLabel); err == nil && prWithLabel.PR != nil {
 			pr = *prWithLabel.PR
 			return nil
 		}
 
-		// Fall back to unmarshaling as just PullRequest (old format)
 		return json.Unmarshal(data, &pr)
 	})
 
@@ -156,7 +145,6 @@ func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullR
 	return &pr, nil
 }
 
-// GetPullRequestWithLabel retrieves a pull request with its label from the database
 func (d *Database) GetPullRequestWithLabel(owner, repo string, number int) (*github.PullRequest, string, error) {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 
@@ -170,7 +158,6 @@ func (d *Database) GetPullRequestWithLabel(owner, repo string, number int) (*git
 			return fmt.Errorf("PR not found")
 		}
 
-		// Try to unmarshal as PRWithLabel first (new format)
 		var prWithLabel PRWithLabel
 		if err := json.Unmarshal(data, &prWithLabel); err == nil && prWithLabel.PR != nil {
 			pr = prWithLabel.PR
@@ -178,13 +165,12 @@ func (d *Database) GetPullRequestWithLabel(owner, repo string, number int) (*git
 			return nil
 		}
 
-		// Fall back to unmarshaling as just PullRequest (old format)
 		var oldPR github.PullRequest
 		if err := json.Unmarshal(data, &oldPR); err != nil {
 			return err
 		}
 		pr = &oldPR
-		label = "" // No label in old format
+		label = ""
 		return nil
 	})
 
@@ -194,13 +180,11 @@ func (d *Database) GetPullRequestWithLabel(owner, repo string, number int) (*git
 	return pr, label, nil
 }
 
-// IssueWithLabel wraps an Issue with its activity label
 type IssueWithLabel struct {
 	Issue *github.Issue
 	Label string
 }
 
-// SaveIssue saves or updates an issue in the database
 func (d *Database) SaveIssue(owner, repo string, issue *github.Issue, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, issue.GetNumber())
 
@@ -228,7 +212,6 @@ func (d *Database) SaveIssue(owner, repo string, issue *github.Issue, debugMode 
 	return err
 }
 
-// SaveIssueWithLabel saves or updates an issue with its label in the database
 func (d *Database) SaveIssueWithLabel(owner, repo string, issue *github.Issue, label string, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, issue.GetNumber())
 
@@ -261,7 +244,6 @@ func (d *Database) SaveIssueWithLabel(owner, repo string, issue *github.Issue, l
 	return err
 }
 
-// GetIssue retrieves an issue from the database
 func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, error) {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 
@@ -273,14 +255,12 @@ func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, erro
 			return fmt.Errorf("issue not found")
 		}
 
-		// Try to unmarshal as IssueWithLabel first (new format)
 		var issueWithLabel IssueWithLabel
 		if err := json.Unmarshal(data, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
 			issue = *issueWithLabel.Issue
 			return nil
 		}
 
-		// Fall back to unmarshaling as just Issue (old format)
 		return json.Unmarshal(data, &issue)
 	})
 
@@ -290,7 +270,6 @@ func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, erro
 	return &issue, nil
 }
 
-// GetIssueWithLabel retrieves an issue with its label from the database
 func (d *Database) GetIssueWithLabel(owner, repo string, number int) (*github.Issue, string, error) {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 
@@ -304,7 +283,6 @@ func (d *Database) GetIssueWithLabel(owner, repo string, number int) (*github.Is
 			return fmt.Errorf("issue not found")
 		}
 
-		// Try to unmarshal as IssueWithLabel first (new format)
 		var issueWithLabel IssueWithLabel
 		if err := json.Unmarshal(data, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
 			issue = issueWithLabel.Issue
@@ -312,13 +290,12 @@ func (d *Database) GetIssueWithLabel(owner, repo string, number int) (*github.Is
 			return nil
 		}
 
-		// Fall back to unmarshaling as just Issue (old format)
 		var oldIssue github.Issue
 		if err := json.Unmarshal(data, &oldIssue); err != nil {
 			return err
 		}
 		issue = &oldIssue
-		label = "" // No label in old format
+		label = ""
 		return nil
 	})
 
@@ -328,8 +305,6 @@ func (d *Database) GetIssueWithLabel(owner, repo string, number int) (*github.Is
 	return issue, label, nil
 }
 
-// SaveComment saves or updates a comment in the database
-// commentType should be "pr_comment" or "issue_comment"
 func (d *Database) SaveComment(owner, repo string, itemNumber int, comment *github.IssueComment, commentType string) error {
 	key := fmt.Sprintf("%s/%s#%d/%s/%d", owner, repo, itemNumber, commentType, comment.GetID())
 
@@ -344,7 +319,6 @@ func (d *Database) SaveComment(owner, repo string, itemNumber int, comment *gith
 	})
 }
 
-// SavePRComment saves or updates a PR review comment in the database
 func (d *Database) SavePRComment(owner, repo string, prNumber int, comment *github.PullRequestComment, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d/pr_review_comment/%d", owner, repo, prNumber, comment.GetID())
 
@@ -372,7 +346,6 @@ func (d *Database) SavePRComment(owner, repo string, prNumber int, comment *gith
 	return err
 }
 
-// GetComment retrieves a comment from the database
 func (d *Database) GetComment(owner, repo string, itemNumber int, commentType string, commentID int64) (*github.IssueComment, error) {
 	key := fmt.Sprintf("%s/%s#%d/%s/%d", owner, repo, itemNumber, commentType, commentID)
 
@@ -392,7 +365,6 @@ func (d *Database) GetComment(owner, repo string, itemNumber int, commentType st
 	return &comment, nil
 }
 
-// Stats returns database statistics
 func (d *Database) Stats() (prCount, issueCount, commentCount int, err error) {
 	err = d.db.View(func(tx *bolt.Tx) error {
 		prCount = tx.Bucket(pullRequestsBucket).Stats().KeyN
@@ -403,7 +375,6 @@ func (d *Database) Stats() (prCount, issueCount, commentCount int, err error) {
 	return
 }
 
-// GetAllPullRequests retrieves all pull requests from the database
 func (d *Database) GetAllPullRequests(debugMode bool) (map[string]*github.PullRequest, error) {
 	prs := make(map[string]*github.PullRequest)
 
@@ -414,14 +385,12 @@ func (d *Database) GetAllPullRequests(debugMode bool) (map[string]*github.PullRe
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(pullRequestsBucket)
 		return b.ForEach(func(k, v []byte) error {
-			// Try to unmarshal as PRWithLabel first (new format)
 			var prWithLabel PRWithLabel
 			if err := json.Unmarshal(v, &prWithLabel); err == nil && prWithLabel.PR != nil {
 				prs[string(k)] = prWithLabel.PR
 				return nil
 			}
 
-			// Fall back to unmarshaling as just PullRequest (old format)
 			var pr github.PullRequest
 			if err := json.Unmarshal(v, &pr); err != nil {
 				if debugMode {
@@ -448,7 +417,6 @@ func (d *Database) GetAllPullRequests(debugMode bool) (map[string]*github.PullRe
 	return prs, nil
 }
 
-// GetAllPullRequestsWithLabels retrieves all pull requests with their labels from the database
 func (d *Database) GetAllPullRequestsWithLabels(debugMode bool) (map[string]*github.PullRequest, map[string]string, error) {
 	prs := make(map[string]*github.PullRequest)
 	labels := make(map[string]string)
@@ -462,7 +430,6 @@ func (d *Database) GetAllPullRequestsWithLabels(debugMode bool) (map[string]*git
 		return b.ForEach(func(k, v []byte) error {
 			key := string(k)
 
-			// Try to unmarshal as PRWithLabel first (new format)
 			var prWithLabel PRWithLabel
 			if err := json.Unmarshal(v, &prWithLabel); err == nil && prWithLabel.PR != nil {
 				prs[key] = prWithLabel.PR
@@ -470,7 +437,6 @@ func (d *Database) GetAllPullRequestsWithLabels(debugMode bool) (map[string]*git
 				return nil
 			}
 
-			// Fall back to unmarshaling as just PullRequest (old format)
 			var pr github.PullRequest
 			if err := json.Unmarshal(v, &pr); err != nil {
 				if debugMode {
@@ -498,7 +464,6 @@ func (d *Database) GetAllPullRequestsWithLabels(debugMode bool) (map[string]*git
 	return prs, labels, nil
 }
 
-// GetAllIssues retrieves all issues from the database
 func (d *Database) GetAllIssues(debugMode bool) (map[string]*github.Issue, error) {
 	issues := make(map[string]*github.Issue)
 
@@ -509,14 +474,12 @@ func (d *Database) GetAllIssues(debugMode bool) (map[string]*github.Issue, error
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(issuesBucket)
 		return b.ForEach(func(k, v []byte) error {
-			// Try to unmarshal as IssueWithLabel first (new format)
 			var issueWithLabel IssueWithLabel
 			if err := json.Unmarshal(v, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
 				issues[string(k)] = issueWithLabel.Issue
 				return nil
 			}
 
-			// Fall back to unmarshaling as just Issue (old format)
 			var issue github.Issue
 			if err := json.Unmarshal(v, &issue); err != nil {
 				if debugMode {
@@ -543,7 +506,6 @@ func (d *Database) GetAllIssues(debugMode bool) (map[string]*github.Issue, error
 	return issues, nil
 }
 
-// GetAllIssuesWithLabels retrieves all issues with their labels from the database
 func (d *Database) GetAllIssuesWithLabels(debugMode bool) (map[string]*github.Issue, map[string]string, error) {
 	issues := make(map[string]*github.Issue)
 	labels := make(map[string]string)
@@ -557,7 +519,6 @@ func (d *Database) GetAllIssuesWithLabels(debugMode bool) (map[string]*github.Is
 		return b.ForEach(func(k, v []byte) error {
 			key := string(k)
 
-			// Try to unmarshal as IssueWithLabel first (new format)
 			var issueWithLabel IssueWithLabel
 			if err := json.Unmarshal(v, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
 				issues[key] = issueWithLabel.Issue
@@ -565,7 +526,6 @@ func (d *Database) GetAllIssuesWithLabels(debugMode bool) (map[string]*github.Is
 				return nil
 			}
 
-			// Fall back to unmarshaling as just Issue (old format)
 			var issue github.Issue
 			if err := json.Unmarshal(v, &issue); err != nil {
 				if debugMode {
@@ -593,7 +553,6 @@ func (d *Database) GetAllIssuesWithLabels(debugMode bool) (map[string]*github.Is
 	return issues, labels, nil
 }
 
-// GetAllComments retrieves all comments from the database
 func (d *Database) GetAllComments() ([]string, error) {
 	var comments []string
 
@@ -611,7 +570,6 @@ func (d *Database) GetAllComments() ([]string, error) {
 	return comments, nil
 }
 
-// GetPRComments retrieves all PR review comments for a specific PR from the database
 func (d *Database) GetPRComments(owner, repo string, prNumber int) ([]*github.PullRequestComment, error) {
 	var comments []*github.PullRequestComment
 	prefix := fmt.Sprintf("%s/%s#%d/pr_review_comment/", owner, repo, prNumber)
@@ -620,7 +578,6 @@ func (d *Database) GetPRComments(owner, repo string, prNumber int) ([]*github.Pu
 		b := tx.Bucket(commentsBucket)
 		c := b.Cursor()
 
-		// Seek to the prefix and iterate over matching keys
 		for k, v := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); k, v = c.Next() {
 			var comment github.PullRequestComment
 			if err := json.Unmarshal(v, &comment); err != nil {

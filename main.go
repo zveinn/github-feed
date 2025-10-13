@@ -12,59 +12,48 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/google/go-github/v57/github"
 )
 
-// PRActivity represents a PR with its activity metadata
 type PRActivity struct {
 	Label      string
 	Owner      string
 	Repo       string
 	PR         *github.PullRequest
 	UpdatedAt  time.Time
-	HasUpdates bool            // True if API version is newer than cached version
-	Issues     []IssueActivity // Related issues linked to this PR
+	HasUpdates bool
+	Issues     []IssueActivity
 }
 
-// IssueActivity represents an issue with its activity metadata
 type IssueActivity struct {
 	Label      string
 	Owner      string
 	Repo       string
 	Issue      *github.Issue
 	UpdatedAt  time.Time
-	HasUpdates bool // True if API version is newer than cached version
+	HasUpdates bool
 }
 
-// Progress tracks API call progress
 type Progress struct {
-	current int
-	total   int
-	mu      sync.Mutex
+	current atomic.Int32
+	total   atomic.Int32
 }
 
 func (p *Progress) increment() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.current++
+	p.current.Add(1)
 }
 
 func (p *Progress) addToTotal(n int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.total += n
+	p.total.Add(int32(n))
 }
 
-func (p *Progress) display() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	percentage := float64(p.current) / float64(p.total) * 100
-
-	// Build the progress bar with colors
-	filled := int(percentage / 2) // 50 chars for 100%
+func (p *Progress) buildBar(current, total int32) (string, *color.Color, float64) {
+	percentage := float64(current) / float64(total) * 100
+	filled := int(percentage / 2)
 	var barContent string
 	for i := range 50 {
 		if i < filled {
@@ -75,8 +64,6 @@ func (p *Progress) display() {
 			barContent += " "
 		}
 	}
-
-	// Choose color based on percentage
 	var barColor *color.Color
 	if percentage < 33 {
 		barColor = color.New(color.FgRed)
@@ -85,57 +72,32 @@ func (p *Progress) display() {
 	} else {
 		barColor = color.New(color.FgGreen)
 	}
+	return barContent, barColor, percentage
+}
 
-	// Format: [colored bar] current/total (percentage%)
+func (p *Progress) display() {
+	current := p.current.Load()
+	total := p.total.Load()
+	barContent, barColor, percentage := p.buildBar(current, total)
 	fmt.Printf("\r[%s] %s/%s (%s) ",
 		barColor.Sprint(barContent),
-		color.New(color.FgCyan).Sprint(p.current),
-		color.New(color.FgCyan).Sprint(p.total),
+		color.New(color.FgCyan).Sprint(current),
+		color.New(color.FgCyan).Sprint(total),
 		barColor.Sprintf("%.0f%%", percentage))
 }
 
 func (p *Progress) displayWithWarning(message string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	percentage := float64(p.current) / float64(p.total) * 100
-
-	// Build the progress bar with colors
-	filled := int(percentage / 2) // 50 chars for 100%
-	var barContent string
-	for i := range 50 {
-		if i < filled {
-			barContent += "="
-		} else if i == filled {
-			barContent += ">"
-		} else {
-			barContent += " "
-		}
-	}
-
-	// Choose color based on percentage
-	var barColor *color.Color
-	if percentage < 33 {
-		barColor = color.New(color.FgRed)
-	} else if percentage < 66 {
-		barColor = color.New(color.FgYellow)
-	} else {
-		barColor = color.New(color.FgGreen)
-	}
-
-	// Clear the line first
-	// fmt.Printf("\r" + strings.Repeat(" ", 120) + "\r")
-
-	// Format: [colored bar] current/total (percentage%) ! warning message
+	current := p.current.Load()
+	total := p.total.Load()
+	barContent, barColor, percentage := p.buildBar(current, total)
 	fmt.Printf("\r[%s] %s/%s (%s) %s ",
 		barColor.Sprint(barContent),
-		color.New(color.FgCyan).Sprint(p.current),
-		color.New(color.FgCyan).Sprint(p.total),
+		color.New(color.FgCyan).Sprint(current),
+		color.New(color.FgCyan).Sprint(total),
 		barColor.Sprintf("%.0f%%", percentage),
 		color.New(color.FgYellow).Sprint("! "+message))
 }
 
-// retryWithBackoff executes an API call with exponential backoff and infinite retries
-// It detects rate limit errors and waits appropriately before retrying
 func retryWithBackoff(ctx context.Context, operation func() error, debugMode bool, operationName string, progress *Progress) error {
 	const (
 		initialBackoff = 1 * time.Second
@@ -152,27 +114,22 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 			return nil
 		}
 
-		// Check if it's a rate limit error
 		isRateLimitError := strings.Contains(err.Error(), "rate limit") ||
 			strings.Contains(err.Error(), "API rate limit exceeded") ||
 			strings.Contains(err.Error(), "403")
 
 		if isRateLimitError {
-			// For rate limit errors, use a longer backoff
 			waitTime := time.Duration(math.Min(float64(backoff), float64(maxBackoff)))
 
 			if debugMode {
 				fmt.Printf("  [%s] Rate limit hit (attempt %d), waiting %v before retry...\n",
 					operationName, attempt, waitTime)
-				// Actually wait in debug mode
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-time.After(waitTime):
-					// Continue to retry
 				}
 			} else {
-				// Show countdown with progress bar
 				ticker := time.NewTicker(1 * time.Second)
 				defer ticker.Stop()
 
@@ -191,24 +148,19 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 				}
 			}
 
-			// Increase backoff exponentially
 			backoff = time.Duration(float64(backoff) * backoffFactor)
 		} else {
-			// For other errors, use shorter backoff
 			waitTime := time.Duration(math.Min(float64(backoff)/2, float64(5*time.Second)))
 
 			if debugMode {
 				fmt.Printf("  [%s] Error (attempt %d): %v, waiting %v before retry...\n",
 					operationName, attempt, err, waitTime)
-				// Actually wait in debug mode
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-time.After(waitTime):
-					// Continue to retry
 				}
 			} else {
-				// Show countdown with progress bar for non-rate-limit errors too
 				ticker := time.NewTicker(1 * time.Second)
 				defer ticker.Stop()
 
@@ -227,7 +179,6 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 				}
 			}
 
-			// Slower increase for non-rate-limit errors
 			backoff = time.Duration(float64(backoff) * 1.5)
 		}
 
@@ -235,7 +186,6 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 	}
 }
 
-// getLabelColor returns a consistent color for a given label
 func getLabelColor(label string) *color.Color {
 	labelColors := map[string]*color.Color{
 		"Authored":         color.New(color.FgCyan),
@@ -254,14 +204,11 @@ func getLabelColor(label string) *color.Color {
 	return color.New(color.FgWhite)
 }
 
-// getUserColor returns a consistent color for a given username using hash
 func getUserColor(username string) *color.Color {
-	// Use hash to get consistent color for each user
 	h := fnv.New32a()
 	h.Write([]byte(username))
 	hash := h.Sum32()
 
-	// Map to a set of nice visible colors
 	colors := []*color.Color{
 		color.New(color.FgHiGreen),
 		color.New(color.FgHiYellow),
@@ -279,7 +226,6 @@ func getUserColor(username string) *color.Color {
 	return colors[hash%uint32(len(colors))]
 }
 
-// getStateColor returns a color for a given issue/PR state
 func getStateColor(state string) *color.Color {
 	switch state {
 	case "open":
@@ -318,14 +264,11 @@ func loadEnvFile(path string) error {
 	return scanner.Err()
 }
 
-// parseTimeRange parses time range strings like "1h", "2d", "3w", "4m", "1y"
-// Returns the duration and an error if parsing fails
 func parseTimeRange(timeStr string) (time.Duration, error) {
 	if len(timeStr) < 2 {
 		return 0, fmt.Errorf("invalid time range format: %s (expected format like 1h, 2d, 3w, 4m, 1y)", timeStr)
 	}
 
-	// Extract number and unit
 	numStr := timeStr[:len(timeStr)-1]
 	unit := timeStr[len(timeStr)-1:]
 
@@ -334,7 +277,6 @@ func parseTimeRange(timeStr string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid time range number: %s (must be a positive integer)", numStr)
 	}
 
-	// Convert to duration based on unit
 	var duration time.Duration
 	switch unit {
 	case "h":
@@ -344,10 +286,8 @@ func parseTimeRange(timeStr string) (time.Duration, error) {
 	case "w":
 		duration = time.Duration(num) * 7 * 24 * time.Hour
 	case "m":
-		// Approximate month as 30 days
 		duration = time.Duration(num) * 30 * 24 * time.Hour
 	case "y":
-		// Approximate year as 365 days
 		duration = time.Duration(num) * 365 * 24 * time.Hour
 	default:
 		return 0, fmt.Errorf("invalid time unit: %s (use h=hours, d=days, w=weeks, m=months, y=years)", unit)
@@ -357,16 +297,14 @@ func parseTimeRange(timeStr string) (time.Duration, error) {
 }
 
 func main() {
-	// Parse command line arguments
 	var username string
-	var timeRange time.Duration = 30 * 24 * time.Hour // Default to 1 month (30 days)
+	var timeRange time.Duration = 30 * 24 * time.Hour
 	var debugMode bool
 	var localMode bool
 	var showLinks bool
 	var allowedReposFlag string
 	var cleanCache bool
 
-	// Parse arguments
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		if arg == "--time" || strings.HasPrefix(arg, "--time=") {
@@ -411,21 +349,18 @@ func main() {
 		}
 	}
 
-	// Get home directory for config paths
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("Error: Could not determine home directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Create ~/.github-feed directory if it doesn't exist
 	configDir := filepath.Join(homeDir, ".github-feed")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		fmt.Printf("Error: Could not create config directory %s: %v\n", configDir, err)
 		os.Exit(1)
 	}
 
-	// Create .env file with template if it doesn't exist
 	envPath := filepath.Join(configDir, ".env")
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
 		envTemplate := `# GitHub Feed Configuration
@@ -448,23 +383,18 @@ ALLOWED_REPOS=
 		}
 	}
 
-	// Load .env file from config directory
-	_ = loadEnvFile(envPath) // Ignore error if file doesn't exist
+	_ = loadEnvFile(envPath)
 
-	// Get username from command line or environment
 	username = os.Getenv("GITHUB_USERNAME")
 	if username == "" {
 		username = os.Getenv("GITHUB_USER")
 	}
 
-	// Parse allowed repositories whitelist
-	// Priority: command line flag > environment variable
 	allowedReposStr := allowedReposFlag
 	if allowedReposStr == "" {
 		allowedReposStr = os.Getenv("ALLOWED_REPOS")
 	}
 
-	// Parse comma-separated list into a map for fast lookup
 	var allowedRepos map[string]bool
 	if allowedReposStr != "" {
 		allowedRepos = make(map[string]bool)
@@ -480,14 +410,11 @@ ALLOWED_REPOS=
 		}
 	}
 
-	// Open database in config directory
 	dbPath := filepath.Join(configDir, "github.db")
 
-	// Clean cache if --clean flag is set
 	if cleanCache {
 		fmt.Println("Cleaning database cache...")
 		if _, err := os.Stat(dbPath); err == nil {
-			// Database file exists, delete it
 			if err := os.Remove(dbPath); err != nil {
 				fmt.Printf("Warning: Failed to delete database file: %v\n", err)
 			} else {
@@ -507,8 +434,6 @@ ALLOWED_REPOS=
 		defer db.Close()
 	}
 
-	// Get GitHub token from environment (try both variable names)
-	// Skip token requirement in local mode
 	token := os.Getenv("GITHUB_ACTIVITY_TOKEN")
 	if token == "" {
 		token = os.Getenv("GITHUB_TOKEN")
@@ -551,8 +476,6 @@ ALLOWED_REPOS=
 	fetchAndDisplayActivity(token, username, timeRange, debugMode, localMode, showLinks, allowedRepos, db)
 }
 
-// isRepoAllowed checks if a repository is in the allowed list
-// If allowedRepos is nil or empty, all repos are allowed
 func isRepoAllowed(owner, repo string, allowedRepos map[string]bool) bool {
 	if allowedRepos == nil || len(allowedRepos) == 0 {
 		return true
@@ -565,7 +488,6 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	var rateLimits *github.RateLimits
 	var err error
 
-	// Wrap rate limit check with retry logic
 	retryErr := retryWithBackoff(ctx, func() error {
 		rateLimits, _, err = client.RateLimit.Get(ctx)
 		return err
@@ -578,14 +500,12 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	core := rateLimits.Core
 	search := rateLimits.Search
 
-	// Display current rate limit status
 	if debugMode {
 		fmt.Printf("Rate Limits - Core: %d/%d, Search: %d/%d\n",
 			core.Remaining, core.Limit,
 			search.Remaining, search.Limit)
 	}
 
-	// Check if we're hitting the rate limit
 	if core.Remaining == 0 {
 		resetTime := core.Reset.Time.Sub(time.Now())
 		fmt.Printf("WARNING: Core API rate limit exceeded! Resets in %v\n", resetTime.Round(time.Second))
@@ -598,8 +518,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 		return fmt.Errorf("search rate limit exceeded, resets at %v", search.Reset.Time.Format("15:04:05"))
 	}
 
-	// Warn if we're getting low on rate limit (below 20% for core, below 5 for search)
-	coreThreshold := core.Limit / 5 // 20%
+	coreThreshold := core.Limit / 5
 	if core.Remaining < coreThreshold && core.Remaining > 0 {
 		fmt.Printf("WARNING: Core API rate limit running low (%d remaining)\n", core.Remaining)
 	}
@@ -617,7 +536,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 	ctx := context.Background()
 	client := github.NewClient(nil).WithAuthToken(token)
 
-	// Check rate limit before making API calls (skip in local mode)
 	if !localMode {
 		if err := checkRateLimit(ctx, client, debugMode); err != nil {
 			fmt.Printf("Skipping this cycle due to rate limit: %v\n", err)
@@ -628,20 +546,16 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 	}
 
-	// Track seen PRs to avoid duplicates
-	seenPRs := make(map[string]bool)
-	var seenPRsMu sync.Mutex
+	var seenPRs sync.Map
 	activities := []PRActivity{}
 
-	// Initialize progress tracker
-	// Start with minimum API calls: 7 PR searches + 5 issue searches = 12 base calls
-	// Add event pages only if not in local mode (3 pages)
-	// Note: total will be adjusted dynamically as we discover pagination and cross-references
-	initialTotal := 12 // 7 PR searches + 5 issue searches
+	initialTotal := 12
 	if !localMode {
-		initialTotal += 3 // 3 event pages
+		initialTotal += 3
 	}
-	progress := &Progress{current: 0, total: initialTotal}
+	progress := &Progress{}
+	progress.current.Store(0)
+	progress.total.Store(int32(initialTotal))
 
 	if debugMode {
 		fmt.Println("Running optimized search queries...")
@@ -650,20 +564,14 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		progress.display()
 	}
 
-	// Calculate date filter from specified time range back
-	// No state filter - show both open and closed items
 	dateAgo := time.Now().Add(-timeRange).Format("2006-01-02")
 	dateFilter := fmt.Sprintf("updated:>=%s", dateAgo)
 
-	// Use GitHub's efficient search API to find all PRs involving the user
-	// We use specific queries to properly label each type of involvement
 
-	// Build query with date filter (no state filter - show both open and closed)
 	buildQuery := func(base string) string {
 		return fmt.Sprintf("%s %s", base, dateFilter)
 	}
 
-	// Parallelize all PR searches
 	var prWg sync.WaitGroup
 	var activitiesMu sync.Mutex
 
@@ -684,26 +592,23 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		query := pq.query
 		label := pq.label
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
+			results := collectSearchResults(ctx, client, query, label, &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
 		})
 	}
 
-	// Also run event collection in parallel
 	if !localMode {
-		// In online mode, fetch from GitHub Events API
 		prWg.Go(func() {
-			results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, allowedRepos, db)
+			results := collectActivityFromEvents(ctx, client, username, &seenPRs, []PRActivity{}, debugMode, progress, allowedRepos, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
 		})
 	} else {
-		// In local mode, fetch "Recent Activity" labeled PRs from database
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, "", "Recent Activity", seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
+			results := collectSearchResults(ctx, client, "", "Recent Activity", &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
@@ -712,13 +617,11 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 
 	prWg.Wait()
 
-	// Now collect issues in parallel
 	if debugMode {
 		fmt.Println()
 		fmt.Println("Running issue search queries...")
 	}
-	seenIssues := make(map[string]bool)
-	var seenIssuesMu sync.Mutex
+	var seenIssues sync.Map
 	issueActivities := []IssueActivity{}
 
 	var issueWg sync.WaitGroup
@@ -739,7 +642,7 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		query := iq.query
 		label := iq.label
 		issueWg.Go(func() {
-			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress, localMode, allowedRepos, db)
+			results := collectIssueSearchResults(ctx, client, query, label, &seenIssues, []IssueActivity{}, debugMode, progress, localMode, allowedRepos, db)
 			issuesMu.Lock()
 			issueActivities = append(issueActivities, results...)
 			issuesMu.Unlock()
@@ -748,18 +651,12 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 
 	issueWg.Wait()
 
-	// Link issues to PRs based on actual cross-references
-	// Only link if: PR mentions issue OR issue mentions PR
-	// Support many-to-many: an issue can be linked to multiple PRs and vice versa
 	if debugMode {
 		fmt.Println("Checking cross-references between PRs and issues...")
 	}
 
-	// Note: Cross-reference checks may or may not make API calls depending on
-	// whether mentions are found in PR/issue bodies. We'll increment progress
-	// dynamically as API calls are made in areCrossReferenced()
 
-	linkedIssues := make(map[string]bool) // Track which issues are linked to at least one PR
+	linkedIssues := make(map[string]bool)
 
 	var wg sync.WaitGroup
 
@@ -769,7 +666,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 
 		for i := range activities {
 			pr := &activities[i]
-			// Only check PRs in the same repo and same owner
 			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
 				wg.Go(func() {
 					if areCrossReferenced(ctx, client, pr, issue, debugMode, progress, localMode, db) {
@@ -788,7 +684,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 
 	wg.Wait()
 
-	// Collect standalone issues (not linked to any PR)
 	standaloneIssues := []IssueActivity{}
 	for _, issue := range issueActivities {
 		issueKey := fmt.Sprintf("%s/%s#%d", issue.Owner, issue.Repo, issue.Issue.GetNumber())
@@ -803,7 +698,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Printf("Total fetch time: %v\n", duration.Round(time.Millisecond))
 		fmt.Printf("Found %d unique PRs and %d unique issues\n", len(activities), len(issueActivities))
 
-		// Show database statistics
 		if db != nil {
 			prCount, issueCount, commentCount, err := db.Stats()
 			if err == nil {
@@ -812,7 +706,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 		fmt.Println()
 	} else {
-		// Clear progress bar and add newline
 		fmt.Print("\r" + strings.Repeat(" ", 80) + "\r")
 	}
 
@@ -821,7 +714,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		return
 	}
 
-	// Sort by UpdatedAt descending (newest first)
 	sort.Slice(activities, func(i, j int) bool {
 		return activities[i].UpdatedAt.After(activities[j].UpdatedAt)
 	})
@@ -829,7 +721,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		return standaloneIssues[i].UpdatedAt.After(standaloneIssues[j].UpdatedAt)
 	})
 
-	// Separate open and closed/merged PRs
 	var openPRs, closedPRs, mergedPRs []PRActivity
 	for _, activity := range activities {
 		if activity.PR.State != nil && *activity.PR.State == "closed" {
@@ -843,7 +734,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 	}
 
-	// Separate open and closed issues
 	var openIssues, closedIssues []IssueActivity
 	for _, issue := range standaloneIssues {
 		if issue.Issue.State != nil && *issue.Issue.State == "closed" {
@@ -853,14 +743,12 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 	}
 
-	// Display open PRs
 	if len(openPRs) > 0 {
 		titleColor := color.New(color.FgHiGreen, color.Bold)
 		fmt.Println(titleColor.Sprint("OPEN PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range openPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
-			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
 					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
@@ -869,7 +757,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 	}
 
-	// Display merged PRs
 	if len(mergedPRs) > 0 {
 		fmt.Println()
 		titleColor := color.New(color.FgHiMagenta, color.Bold)
@@ -877,7 +764,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Println("------------------------------------------")
 		for _, activity := range mergedPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
-			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
 					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
@@ -886,7 +772,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 	}
 
-	// Display closed PRs
 	if len(closedPRs) > 0 {
 		fmt.Println()
 		titleColor := color.New(color.FgHiRed, color.Bold)
@@ -894,7 +779,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Println("------------------------------------------")
 		for _, activity := range closedPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
-			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
 					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
@@ -903,7 +787,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 	}
 
-	// Display open standalone issues
 	if len(openIssues) > 0 {
 		fmt.Println()
 		titleColor := color.New(color.FgHiGreen, color.Bold)
@@ -914,7 +797,6 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		}
 	}
 
-	// Display closed standalone issues
 	if len(closedIssues) > 0 {
 		fmt.Println()
 		titleColor := color.New(color.FgHiRed, color.Bold)
@@ -936,24 +818,20 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 			issue.Owner, issue.Repo, issueNumber)
 	}
 
-	// Check if PR body mentions the issue (e.g., "fixes #123", "#123", "closes #123")
 	prBody := pr.PR.GetBody()
 	if mentionsNumber(prBody, issueNumber, pr.Owner, pr.Repo) {
 		return true
 	}
 
-	// Check if issue body mentions the PR
 	issueBody := issue.Issue.GetBody()
 	if mentionsNumber(issueBody, prNumber, issue.Owner, issue.Repo) {
 		return true
 	}
 
-	// Check PR comments for issue mentions
 	var prComments []*github.PullRequestComment
 	var err error
 
 	if localMode {
-		// Fetch comments from database in local mode
 		if db != nil {
 			prComments, err = db.GetPRComments(pr.Owner, pr.Repo, prNumber)
 			if err != nil && debugMode {
@@ -962,13 +840,11 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 			}
 		}
 	} else {
-		// Add this API call to the progress total
 		progress.addToTotal(1)
 		if !debugMode {
 			progress.display()
 		}
 
-		// Fetch comments from GitHub API in online mode
 		retryErr := retryWithBackoff(ctx, func() error {
 			prComments, _, err = client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
 				ListOptions: github.ListOptions{PerPage: 100},
@@ -976,18 +852,15 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 			return err
 		}, debugMode, fmt.Sprintf("Comments-PR#%d", prNumber), progress)
 
-		// Increment progress after API call
 		progress.increment()
 		if !debugMode {
 			progress.display()
 		}
 
-		// If retry failed, set err for the later check
 		if retryErr != nil {
 			err = retryErr
 		}
 
-		// Save comments to database for future local mode use
 		if err == nil && db != nil {
 			for _, comment := range prComments {
 				_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment, debugMode)
@@ -995,7 +868,6 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 		}
 	}
 
-	// Check comments for issue mentions
 	if err == nil {
 		for _, comment := range prComments {
 			if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
@@ -1007,9 +879,6 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 	return false
 }
 
-// mentionsNumber checks if text contains a reference to a given issue/PR number
-// Looks for patterns like: #123, fixes #123, closes #123, resolves #123, etc.
-// Also checks for full GitHub URLs like: https://github.com/owner/repo/issues/123
 func mentionsNumber(text string, number int, owner string, repo string) bool {
 	if text == "" {
 		return false
@@ -1017,8 +886,6 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 
 	lowerText := strings.ToLower(text)
 
-	// Check for full GitHub URL patterns
-	// Both issues and pull requests can be referenced using /issues/ or /pull/ in the URL
 	urlPatterns := []string{
 		fmt.Sprintf("github.com/%s/%s/issues/%d", strings.ToLower(owner), strings.ToLower(repo), number),
 		fmt.Sprintf("github.com/%s/%s/pull/%d", strings.ToLower(owner), strings.ToLower(repo), number),
@@ -1029,7 +896,6 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 		}
 	}
 
-	// Common shorthand patterns for referencing issues/PRs
 	patterns := []string{
 		fmt.Sprintf("#%d", number),
 		fmt.Sprintf("fixes #%d", number),
@@ -1052,8 +918,7 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, allowedRepos map[string]bool, db *Database) []PRActivity {
-	// Fetch user's recent events to catch any PR activity
+func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs *sync.Map, activities []PRActivity, debugMode bool, progress *Progress, allowedRepos map[string]bool, db *Database) []PRActivity {
 	opts := &github.ListOptions{PerPage: 100}
 
 	if debugMode {
@@ -1061,7 +926,6 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	}
 	totalPRs := 0
 
-	// Get up to 300 recent events (3 pages) to catch recent activity
 	for page := range 3 {
 		if debugMode {
 			fmt.Printf("  [Events] Fetching page %d...\n", page+1)
@@ -1076,7 +940,6 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 			return err
 		}, debugMode, fmt.Sprintf("Events-page%d", page+1), progress)
 
-		// Increment progress after API call
 		progress.increment()
 		if !debugMode {
 			progress.display()
@@ -1088,19 +951,16 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 		}
 
 		for _, event := range events {
-			// Look for PR-related events
 			if event.Type == nil || event.Repo == nil {
 				continue
 			}
 
 			eventType := *event.Type
-			// PR events: PullRequestEvent, PullRequestReviewEvent, PullRequestReviewCommentEvent, IssueCommentEvent
 			if eventType == "PullRequestEvent" ||
 				eventType == "PullRequestReviewEvent" ||
 				eventType == "PullRequestReviewCommentEvent" ||
 				eventType == "IssueCommentEvent" {
 
-				// Parse repo owner and name
 				repoName := *event.Repo.Name
 				parts := strings.Split(repoName, "/")
 				if len(parts) != 2 {
@@ -1108,12 +968,10 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 				}
 				owner, repo := parts[0], parts[1]
 
-				// Apply repository whitelist filter
 				if !isRepoAllowed(owner, repo, allowedRepos) {
 					continue
 				}
 
-				// Try to extract PR number from the event payload
 				var prNumber int
 				if eventType == "PullRequestEvent" && event.Payload() != nil {
 					if prEvent, ok := event.Payload().(*github.PullRequestEvent); ok && prEvent.PullRequest != nil {
@@ -1136,21 +994,14 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 				if prNumber > 0 {
 					prKey := fmt.Sprintf("%s/%s#%d", owner, repo, prNumber)
 
-					seenPRsMu.Lock()
-					seen := seenPRs[prKey]
-					if !seen {
-						seenPRs[prKey] = true
-					}
-					seenPRsMu.Unlock()
+					_, seen := seenPRs.LoadOrStore(prKey, true)
 
 					if !seen {
-						// Add this PR fetch to the progress total
 						progress.addToTotal(1)
 						if !debugMode {
 							progress.display()
 						}
 
-						// Fetch the PR details
 						var pr *github.PullRequest
 						var prErr error
 
@@ -1159,7 +1010,6 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 							return prErr
 						}, debugMode, fmt.Sprintf("Events-PR#%d", prNumber), progress)
 
-						// Increment progress after API call
 						progress.increment()
 						if !debugMode {
 							progress.display()
@@ -1169,18 +1019,15 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 							continue
 						}
 
-						// Check if PR has updates compared to cached version
 						hasUpdates := false
 						label := "Recent Activity"
 						if db != nil {
 							cachedPR, err := db.GetPullRequest(owner, repo, prNumber)
 							if err == nil {
-								// Compare timestamps - if API version is newer, mark as updated
 								if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
 									hasUpdates = true
 								}
 							}
-							// Save PR to database with label
 							_ = db.SavePullRequestWithLabel(owner, repo, pr, label, debugMode)
 						}
 
@@ -1215,8 +1062,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []PRActivity {
-	// In local mode, fetch from database instead of API
+func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs *sync.Map, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []PRActivity {
 	if localMode {
 		if db == nil {
 			return activities
@@ -1236,16 +1082,12 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 
 		totalFound := 0
 		for key, pr := range allPRs {
-			// Get the stored label for this PR
 			storedLabel := prLabels[key]
 
-			// Only include PRs that match the requested label
-			// If PR has no stored label (old format), skip it in local mode
 			if storedLabel != label {
 				continue
 			}
 
-			// Parse owner/repo from key format: "owner/repo#number"
 			parts := strings.Split(key, "/")
 			if len(parts) < 2 {
 				continue
@@ -1258,19 +1100,13 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			}
 			repo := repoParts[0]
 
-			// Apply repository whitelist filter
 			if !isRepoAllowed(owner, repo, allowedRepos) {
 				continue
 			}
 
 			prKey := key
 
-			seenPRsMu.Lock()
-			seen := seenPRs[prKey]
-			if !seen {
-				seenPRs[prKey] = true
-			}
-			seenPRsMu.Unlock()
+			_, seen := seenPRs.LoadOrStore(prKey, true)
 
 			if !seen {
 				activities = append(activities, PRActivity{
@@ -1291,14 +1127,12 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		return activities
 	}
 
-	// Original API-based implementation
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 
 	totalFound := 0
 
-	// Paginate through all results
 	page := 1
 	for {
 		if debugMode {
@@ -1309,19 +1143,16 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		var resp *github.Response
 		var err error
 
-		// Wrap API call with retry logic
 		retryErr := retryWithBackoff(ctx, func() error {
 			result, resp, err = client.Search.Issues(ctx, query, opts)
 			return err
 		}, debugMode, fmt.Sprintf("%s-page%d", label, page), progress)
 
-		// Increment progress after API call
 		progress.increment()
 		if !debugMode {
 			progress.display()
 		}
 
-		// If there are more pages, add them to the total on first page
 		if page == 1 && resp != nil && resp.NextPage != 0 {
 			lastPage := resp.LastPage
 			if lastPage > 1 {
@@ -1347,14 +1178,11 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 
 		pageResults := 0
 		for _, issue := range result.Issues {
-			// Only process issues that are actually PRs
 			if issue.PullRequestLinks == nil {
 				continue
 			}
 
-			// Parse owner/repo from repository URL
 			repoURL := *issue.RepositoryURL
-			// Extract owner and repo from URL like: https://api.github.com/repos/owner/repo
 			parts := strings.Split(repoURL, "/")
 			if len(parts) < 2 {
 				fmt.Printf("  [%s] Error: Invalid repository URL format: %s\n", label, repoURL)
@@ -1363,28 +1191,20 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			owner := parts[len(parts)-2]
 			repo := parts[len(parts)-1]
 
-			// Apply repository whitelist filter
 			if !isRepoAllowed(owner, repo, allowedRepos) {
 				continue
 			}
 
 			prKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
-			seenPRsMu.Lock()
-			seen := seenPRs[prKey]
-			if !seen {
-				seenPRs[prKey] = true
-			}
-			seenPRsMu.Unlock()
+			_, seen := seenPRs.LoadOrStore(prKey, true)
 
 			if !seen {
-				// Add this PR detail fetch to the progress total
 				progress.addToTotal(1)
 				if !debugMode {
 					progress.display()
 				}
 
-				// Fetch the actual PR to get more details
 				var pr *github.PullRequest
 				var prErr error
 
@@ -1393,17 +1213,14 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 					return prErr
 				}, debugMode, fmt.Sprintf("%s-PR#%d", label, *issue.Number), progress)
 
-				// Increment progress after API call
 				progress.increment()
 				if !debugMode {
 					progress.display()
 				}
 
 				if retryErr != nil {
-					// Log the error but still try to show the PR with limited info
 					fmt.Printf("  [%s] Warning: Could not fetch details for %s/%s#%d: %v\n", label, owner, repo, *issue.Number, retryErr)
 
-					// Create a minimal PR object from the issue data
 					pr = &github.PullRequest{
 						Number:    issue.Number,
 						Title:     issue.Title,
@@ -1414,12 +1231,10 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 					}
 				}
 
-				// Check if PR has updates compared to cached version
 				hasUpdates := false
 				if db != nil {
 					cachedPR, err := db.GetPullRequest(owner, repo, *issue.Number)
 					if err == nil {
-						// Compare timestamps - if API version is newer, mark as updated
 						if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
 							hasUpdates = true
 							if debugMode {
@@ -1430,7 +1245,6 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 							}
 						}
 					}
-					// Save PR to database with label
 					_ = db.SavePullRequestWithLabel(owner, repo, pr, label, debugMode)
 				}
 
@@ -1451,7 +1265,6 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			fmt.Printf("  [%s] Page %d: found %d new PRs (total: %d)\n", label, page, pageResults, totalFound)
 		}
 
-		// Check if there are more pages
 		if resp.NextPage == 0 {
 			break
 		}
@@ -1467,7 +1280,6 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 }
 
 func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool, showLinks bool) {
-	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if pr.UpdatedAt != nil {
 		dateStr = pr.UpdatedAt.Format("2006/01/02")
@@ -1476,7 +1288,6 @@ func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates boo
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(pr.User.GetLogin())
 
-	// Add update icon if item has updates
 	updateIcon := ""
 	if hasUpdates {
 		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
@@ -1491,14 +1302,12 @@ func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates boo
 		*pr.Title,
 	)
 
-	// Show link if --links flag is set
 	if showLinks && pr.HTMLURL != nil {
 		fmt.Printf("   🔗 %s\n", *pr.HTMLURL)
 	}
 }
 
 func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool, showLinks bool) {
-	// Use UpdatedAt as the most recent activity date
 	dateStr := "          "
 	if issue.UpdatedAt != nil {
 		dateStr = issue.UpdatedAt.Format("2006/01/02")
@@ -1516,7 +1325,6 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(issue.User.GetLogin())
 
-	// Add update icon if item has updates
 	updateIcon := ""
 	if hasUpdates {
 		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
@@ -1532,14 +1340,12 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 		*issue.Title,
 	)
 
-	// Show link if --links flag is set
 	if showLinks && issue.HTMLURL != nil {
 		fmt.Printf("%s🔗 %s\n", linkIndent, *issue.HTMLURL)
 	}
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []IssueActivity {
-	// In local mode, fetch from database instead of API
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues *sync.Map, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []IssueActivity {
 	if localMode {
 		if db == nil {
 			return issueActivities
@@ -1559,16 +1365,12 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 
 		totalFound := 0
 		for key, issue := range allIssues {
-			// Get the stored label for this issue
 			storedLabel := issueLabels[key]
 
-			// Only include issues that match the requested label
-			// If issue has no stored label (old format), skip it in local mode
 			if storedLabel != label {
 				continue
 			}
 
-			// Parse owner/repo from key format: "owner/repo#number"
 			parts := strings.Split(key, "/")
 			if len(parts) < 2 {
 				continue
@@ -1581,19 +1383,13 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			}
 			repo := repoParts[0]
 
-			// Apply repository whitelist filter
 			if !isRepoAllowed(owner, repo, allowedRepos) {
 				continue
 			}
 
 			issueKey := key
 
-			seenIssuesMu.Lock()
-			seen := seenIssues[issueKey]
-			if !seen {
-				seenIssues[issueKey] = true
-			}
-			seenIssuesMu.Unlock()
+			_, seen := seenIssues.LoadOrStore(issueKey, true)
 
 			if !seen {
 				issueActivities = append(issueActivities, IssueActivity{
@@ -1614,14 +1410,12 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		return issueActivities
 	}
 
-	// Original API-based implementation
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 
 	totalFound := 0
 
-	// Paginate through all results
 	page := 1
 	for {
 		if debugMode {
@@ -1632,19 +1426,16 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		var resp *github.Response
 		var err error
 
-		// Wrap API call with retry logic
 		retryErr := retryWithBackoff(ctx, func() error {
 			result, resp, err = client.Search.Issues(ctx, query, opts)
 			return err
 		}, debugMode, fmt.Sprintf("%s-issues-page%d", label, page), progress)
 
-		// Increment progress after API call
 		progress.increment()
 		if !debugMode {
 			progress.display()
 		}
 
-		// If there are more pages, add them to the total on first page
 		if page == 1 && resp != nil && resp.NextPage != 0 {
 			lastPage := resp.LastPage
 			if lastPage > 1 {
@@ -1670,12 +1461,10 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 
 		pageResults := 0
 		for _, issue := range result.Issues {
-			// Skip if this is actually a PR
 			if issue.PullRequestLinks != nil {
 				continue
 			}
 
-			// Parse owner/repo from repository URL
 			repoURL := *issue.RepositoryURL
 			parts := strings.Split(repoURL, "/")
 			if len(parts) < 2 {
@@ -1685,32 +1474,23 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			owner := parts[len(parts)-2]
 			repo := parts[len(parts)-1]
 
-			// Apply repository whitelist filter
 			if !isRepoAllowed(owner, repo, allowedRepos) {
 				continue
 			}
 
 			issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
-			seenIssuesMu.Lock()
-			seen := seenIssues[issueKey]
-			if !seen {
-				seenIssues[issueKey] = true
-			}
-			seenIssuesMu.Unlock()
+			_, seen := seenIssues.LoadOrStore(issueKey, true)
 
 			if !seen {
-				// Check if issue has updates compared to cached version
 				hasUpdates := false
 				if db != nil {
 					cachedIssue, err := db.GetIssue(owner, repo, *issue.Number)
 					if err == nil {
-						// Compare timestamps - if API version is newer, mark as updated
 						if issue.GetUpdatedAt().After(cachedIssue.GetUpdatedAt().Time) {
 							hasUpdates = true
 						}
 					}
-					// Save issue to database with label
 					_ = db.SaveIssueWithLabel(owner, repo, issue, label, debugMode)
 				}
 
@@ -1731,7 +1511,6 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			fmt.Printf("  [%s] Page %d: found %d new issues (total: %d)\n", label, page, pageResults, totalFound)
 		}
 
-		// Check if there are more pages
 		if resp.NextPage == 0 {
 			break
 		}
