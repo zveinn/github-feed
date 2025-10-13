@@ -164,6 +164,13 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 			if debugMode {
 				fmt.Printf("  [%s] Rate limit hit (attempt %d), waiting %v before retry...\n",
 					operationName, attempt, waitTime)
+				// Actually wait in debug mode
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(waitTime):
+					// Continue to retry
+				}
 			} else {
 				// Show countdown with progress bar
 				ticker := time.NewTicker(1 * time.Second)
@@ -193,6 +200,13 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 			if debugMode {
 				fmt.Printf("  [%s] Error (attempt %d): %v, waiting %v before retry...\n",
 					operationName, attempt, err, waitTime)
+				// Actually wait in debug mode
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(waitTime):
+					// Continue to retry
+				}
 			} else {
 				// Show countdown with progress bar for non-rate-limit errors too
 				ticker := time.NewTicker(1 * time.Second)
@@ -350,6 +364,7 @@ func main() {
 	var localMode bool
 	var showLinks bool
 	var allowedReposFlag string
+	var cleanCache bool
 
 	// Parse arguments
 	for i := 1; i < len(os.Args); i++ {
@@ -379,6 +394,8 @@ func main() {
 			localMode = true
 		} else if arg == "--links" {
 			showLinks = true
+		} else if arg == "--clean" {
+			cleanCache = true
 		} else if arg == "--allowed-repos" || strings.HasPrefix(arg, "--allowed-repos=") {
 			if strings.HasPrefix(arg, "--allowed-repos=") {
 				allowedReposFlag = strings.TrimPrefix(arg, "--allowed-repos=")
@@ -465,6 +482,22 @@ ALLOWED_REPOS=
 
 	// Open database in config directory
 	dbPath := filepath.Join(configDir, "github.db")
+
+	// Clean cache if --clean flag is set
+	if cleanCache {
+		fmt.Println("Cleaning database cache...")
+		if _, err := os.Stat(dbPath); err == nil {
+			// Database file exists, delete it
+			if err := os.Remove(dbPath); err != nil {
+				fmt.Printf("Warning: Failed to delete database file: %v\n", err)
+			} else {
+				fmt.Println("Database cache cleaned successfully")
+			}
+		} else {
+			fmt.Println("No existing database cache to clean")
+		}
+	}
+
 	db, err := OpenDatabase(dbPath)
 	if err != nil {
 		fmt.Printf("Warning: Failed to open database: %v\n", err)
@@ -494,12 +527,13 @@ ALLOWED_REPOS=
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--time RANGE] [--debug] [--local] [--links] [--allowed-repos REPOS] [username]")
+		fmt.Println("Usage: github-feed [--time RANGE] [--debug] [--local] [--links] [--clean] [--allowed-repos REPOS] [username]")
 		fmt.Println("  --time RANGE: Show items from the last time range (default: 1m)")
 		fmt.Println("                Examples: 1h (1 hour), 2d (2 days), 3w (3 weeks), 4m (4 months), 1y (1 year)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
 		fmt.Println("  --links: Show hyperlinks underneath each PR/issue")
+		fmt.Println("  --clean: Delete and recreate the database cache")
 		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
 		fmt.Printf("Or add it to %s\n", envPath)
