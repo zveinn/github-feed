@@ -43,6 +43,21 @@ type Progress struct {
 	total   atomic.Int32
 }
 
+type Config struct {
+	debugMode    bool
+	localMode    bool
+	showLinks    bool
+	timeRange    time.Duration
+	username     string
+	allowedRepos map[string]bool
+	client       *github.Client
+	db           *Database
+	progress     *Progress
+	ctx          context.Context
+}
+
+var config Config
+
 func (p *Progress) increment() {
 	p.current.Add(1)
 }
@@ -98,7 +113,7 @@ func (p *Progress) displayWithWarning(message string) {
 		color.New(color.FgYellow).Sprint("! "+message))
 }
 
-func retryWithBackoff(ctx context.Context, operation func() error, debugMode bool, operationName string, progress *Progress) error {
+func retryWithBackoff(operation func() error, operationName string) error {
 	const (
 		initialBackoff = 1 * time.Second
 		maxBackoff     = 30 * time.Second
@@ -121,12 +136,12 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 		if isRateLimitError {
 			waitTime := time.Duration(math.Min(float64(backoff), float64(maxBackoff)))
 
-			if debugMode {
+			if config.debugMode {
 				fmt.Printf("  [%s] Rate limit hit (attempt %d), waiting %v before retry...\n",
 					operationName, attempt, waitTime)
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-config.ctx.Done():
+					return config.ctx.Err()
 				case <-time.After(waitTime):
 				}
 			} else {
@@ -135,13 +150,13 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 
 				remaining := int(waitTime.Seconds())
 				for remaining > 0 {
-					if progress != nil {
-						progress.displayWithWarning(fmt.Sprintf("Rate limit hit, retrying in %ds", remaining))
+					if config.progress != nil {
+						config.progress.displayWithWarning(fmt.Sprintf("Rate limit hit, retrying in %ds", remaining))
 					}
 
 					select {
-					case <-ctx.Done():
-						return ctx.Err()
+					case <-config.ctx.Done():
+						return config.ctx.Err()
 					case <-ticker.C:
 						remaining--
 					}
@@ -152,12 +167,12 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 		} else {
 			waitTime := time.Duration(math.Min(float64(backoff)/2, float64(5*time.Second)))
 
-			if debugMode {
+			if config.debugMode {
 				fmt.Printf("  [%s] Error (attempt %d): %v, waiting %v before retry...\n",
 					operationName, attempt, err, waitTime)
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-config.ctx.Done():
+					return config.ctx.Err()
 				case <-time.After(waitTime):
 				}
 			} else {
@@ -166,13 +181,13 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 
 				remaining := int(waitTime.Seconds())
 				for remaining > 0 {
-					if progress != nil {
-						progress.displayWithWarning(fmt.Sprintf("API error, retrying in %ds", remaining))
+					if config.progress != nil {
+						config.progress.displayWithWarning(fmt.Sprintf("API error, retrying in %ds", remaining))
 					}
 
 					select {
-					case <-ctx.Done():
-						return ctx.Err()
+					case <-config.ctx.Done():
+						return config.ctx.Err()
 					case <-ticker.C:
 						remaining--
 					}
@@ -339,7 +354,7 @@ func main() {
 				allowedReposFlag = strings.TrimPrefix(arg, "--allowed-repos=")
 			} else if i+1 < len(os.Args) {
 				allowedReposFlag = os.Args[i+1]
-				i++ // Skip next argument
+				i++
 			} else {
 				fmt.Println("Error: --allowed-repos requires a comma-separated list of repos")
 				os.Exit(1)
@@ -473,25 +488,35 @@ ALLOWED_REPOS=
 		fmt.Println("Debug mode enabled")
 	}
 
-	fetchAndDisplayActivity(token, username, timeRange, debugMode, localMode, showLinks, allowedRepos, db)
+	config.debugMode = debugMode
+	config.localMode = localMode
+	config.showLinks = showLinks
+	config.timeRange = timeRange
+	config.username = username
+	config.allowedRepos = allowedRepos
+	config.db = db
+	config.ctx = context.Background()
+	config.client = github.NewClient(nil).WithAuthToken(token)
+
+	fetchAndDisplayActivity()
 }
 
-func isRepoAllowed(owner, repo string, allowedRepos map[string]bool) bool {
-	if allowedRepos == nil || len(allowedRepos) == 0 {
+func isRepoAllowed(owner, repo string) bool {
+	if config.allowedRepos == nil || len(config.allowedRepos) == 0 {
 		return true
 	}
 	repoKey := fmt.Sprintf("%s/%s", owner, repo)
-	return allowedRepos[repoKey]
+	return config.allowedRepos[repoKey]
 }
 
-func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) error {
+func checkRateLimit() error {
 	var rateLimits *github.RateLimits
 	var err error
 
-	retryErr := retryWithBackoff(ctx, func() error {
-		rateLimits, _, err = client.RateLimit.Get(ctx)
+	retryErr := retryWithBackoff(func() error {
+		rateLimits, _, err = config.client.RateLimit.Get(config.ctx)
 		return err
-	}, debugMode, "RateLimitCheck", nil)
+	}, "RateLimitCheck")
 
 	if retryErr != nil {
 		return fmt.Errorf("failed to fetch rate limit: %w", retryErr)
@@ -500,7 +525,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	core := rateLimits.Core
 	search := rateLimits.Search
 
-	if debugMode {
+	if config.debugMode {
 		fmt.Printf("Rate Limits - Core: %d/%d, Search: %d/%d\n",
 			core.Remaining, core.Limit,
 			search.Remaining, search.Limit)
@@ -530,18 +555,15 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string, timeRange time.Duration, debugMode bool, localMode bool, showLinks bool, allowedRepos map[string]bool, db *Database) {
+func fetchAndDisplayActivity() {
 	startTime := time.Now()
 
-	ctx := context.Background()
-	client := github.NewClient(nil).WithAuthToken(token)
-
-	if !localMode {
-		if err := checkRateLimit(ctx, client, debugMode); err != nil {
+	if !config.localMode {
+		if err := checkRateLimit(); err != nil {
 			fmt.Printf("Skipping this cycle due to rate limit: %v\n", err)
 			return
 		}
-		if debugMode {
+		if config.debugMode {
 			fmt.Println()
 		}
 	}
@@ -550,21 +572,21 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 	activities := []PRActivity{}
 
 	initialTotal := 12
-	if !localMode {
+	if !config.localMode {
 		initialTotal += 3
 	}
-	progress := &Progress{}
-	progress.current.Store(0)
-	progress.total.Store(int32(initialTotal))
+	config.progress = &Progress{}
+	config.progress.current.Store(0)
+	config.progress.total.Store(int32(initialTotal))
 
-	if debugMode {
+	if config.debugMode {
 		fmt.Println("Running optimized search queries...")
 	} else {
 		fmt.Print("Fetching data from GitHub... ")
-		progress.display()
+		config.progress.display()
 	}
 
-	dateAgo := time.Now().Add(-timeRange).Format("2006-01-02")
+	dateAgo := time.Now().Add(-config.timeRange).Format("2006-01-02")
 	dateFilter := fmt.Sprintf("updated:>=%s", dateAgo)
 
 
@@ -579,36 +601,36 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		query string
 		label string
 	}{
-		{buildQuery(fmt.Sprintf("is:pr reviewed-by:%s", username)), "Reviewed"},
-		{buildQuery(fmt.Sprintf("is:pr review-requested:%s", username)), "Review Requested"},
-		{buildQuery(fmt.Sprintf("is:pr author:%s", username)), "Authored"},
-		{buildQuery(fmt.Sprintf("is:pr assignee:%s", username)), "Assigned"},
-		{buildQuery(fmt.Sprintf("is:pr involves:%s", username)), "Involved"},
-		{buildQuery(fmt.Sprintf("is:pr commenter:%s", username)), "Commented"},
-		{buildQuery(fmt.Sprintf("is:pr mentions:%s", username)), "Mentioned"},
+		{buildQuery(fmt.Sprintf("is:pr reviewed-by:%s", config.username)), "Reviewed"},
+		{buildQuery(fmt.Sprintf("is:pr review-requested:%s", config.username)), "Review Requested"},
+		{buildQuery(fmt.Sprintf("is:pr author:%s", config.username)), "Authored"},
+		{buildQuery(fmt.Sprintf("is:pr assignee:%s", config.username)), "Assigned"},
+		{buildQuery(fmt.Sprintf("is:pr involves:%s", config.username)), "Involved"},
+		{buildQuery(fmt.Sprintf("is:pr commenter:%s", config.username)), "Commented"},
+		{buildQuery(fmt.Sprintf("is:pr mentions:%s", config.username)), "Mentioned"},
 	}
 
 	for _, pq := range prQueries {
 		query := pq.query
 		label := pq.label
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, query, label, &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db, timeRange)
+			results := collectSearchResults(query, label, &seenPRs, []PRActivity{})
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
 		})
 	}
 
-	if !localMode {
+	if !config.localMode {
 		prWg.Go(func() {
-			results := collectActivityFromEvents(ctx, client, username, &seenPRs, []PRActivity{}, debugMode, progress, allowedRepos, db)
+			results := collectActivityFromEvents(&seenPRs, []PRActivity{})
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
 		})
 	} else {
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, "", "Recent Activity", &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db, timeRange)
+			results := collectSearchResults("", "Recent Activity", &seenPRs, []PRActivity{})
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
@@ -617,7 +639,7 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 
 	prWg.Wait()
 
-	if debugMode {
+	if config.debugMode {
 		fmt.Println()
 		fmt.Println("Running issue search queries...")
 	}
@@ -631,18 +653,18 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		query string
 		label string
 	}{
-		{buildQuery(fmt.Sprintf("is:issue author:%s", username)), "Authored"},
-		{buildQuery(fmt.Sprintf("is:issue mentions:%s", username)), "Mentioned"},
-		{buildQuery(fmt.Sprintf("is:issue assignee:%s", username)), "Assigned"},
-		{buildQuery(fmt.Sprintf("is:issue commenter:%s", username)), "Commented"},
-		{buildQuery(fmt.Sprintf("is:issue involves:%s", username)), "Involved"},
+		{buildQuery(fmt.Sprintf("is:issue author:%s", config.username)), "Authored"},
+		{buildQuery(fmt.Sprintf("is:issue mentions:%s", config.username)), "Mentioned"},
+		{buildQuery(fmt.Sprintf("is:issue assignee:%s", config.username)), "Assigned"},
+		{buildQuery(fmt.Sprintf("is:issue commenter:%s", config.username)), "Commented"},
+		{buildQuery(fmt.Sprintf("is:issue involves:%s", config.username)), "Involved"},
 	}
 
 	for _, iq := range issueQueries {
 		query := iq.query
 		label := iq.label
 		issueWg.Go(func() {
-			results := collectIssueSearchResults(ctx, client, query, label, &seenIssues, []IssueActivity{}, debugMode, progress, localMode, allowedRepos, db, timeRange)
+			results := collectIssueSearchResults(query, label, &seenIssues, []IssueActivity{})
 			issuesMu.Lock()
 			issueActivities = append(issueActivities, results...)
 			issuesMu.Unlock()
@@ -651,7 +673,7 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 
 	issueWg.Wait()
 
-	if debugMode {
+	if config.debugMode {
 		fmt.Println("Checking cross-references between PRs and issues...")
 	}
 
@@ -668,10 +690,10 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 			pr := &activities[i]
 			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
 				wg.Go(func() {
-					if areCrossReferenced(ctx, client, pr, issue, debugMode, progress, localMode, db) {
+					if areCrossReferenced(pr, issue) {
 						pr.Issues = append(pr.Issues, *issue)
 						linkedIssues[issueKey] = true
-						if debugMode {
+						if config.debugMode {
 							fmt.Printf("  Linked %s/%s#%d <-> %s/%s#%d\n",
 								pr.Owner, pr.Repo, pr.PR.GetNumber(),
 								issue.Owner, issue.Repo, issue.Issue.GetNumber())
@@ -693,13 +715,13 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 	}
 
 	duration := time.Since(startTime)
-	if debugMode {
+	if config.debugMode {
 		fmt.Println()
 		fmt.Printf("Total fetch time: %v\n", duration.Round(time.Millisecond))
 		fmt.Printf("Found %d unique PRs and %d unique issues\n", len(activities), len(issueActivities))
 
-		if db != nil {
-			prCount, issueCount, commentCount, err := db.Stats()
+		if config.db != nil {
+			prCount, issueCount, commentCount, err := config.db.Stats()
 			if err == nil {
 				fmt.Printf("Database stats: %d PRs, %d issues, %d comments\n", prCount, issueCount, commentCount)
 			}
@@ -748,10 +770,10 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Println(titleColor.Sprint("OPEN PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range openPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -763,10 +785,10 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Println(titleColor.Sprint("MERGED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range mergedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -778,10 +800,10 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Println(titleColor.Sprint("CLOSED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range closedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates, showLinks)
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
 			if len(activity.Issues) > 0 {
 				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates, showLinks)
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
 				}
 			}
 		}
@@ -793,7 +815,7 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Println(titleColor.Sprint("OPEN ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range openIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates, showLinks)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
 		}
 	}
 
@@ -803,16 +825,16 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		fmt.Println(titleColor.Sprint("CLOSED ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range closedIssues {
-			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates, showLinks)
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
 		}
 	}
 }
 
-func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity, debugMode bool, progress *Progress, localMode bool, db *Database) bool {
+func areCrossReferenced(pr *PRActivity, issue *IssueActivity) bool {
 	prNumber := pr.PR.GetNumber()
 	issueNumber := issue.Issue.GetNumber()
 
-	if debugMode {
+	if config.debugMode {
 		fmt.Printf("  Checking cross-reference: PR %s/%s#%d <-> Issue %s/%s#%d\n",
 			pr.Owner, pr.Repo, prNumber,
 			issue.Owner, issue.Repo, issueNumber)
@@ -831,39 +853,39 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 	var prComments []*github.PullRequestComment
 	var err error
 
-	if localMode {
-		if db != nil {
-			prComments, err = db.GetPRComments(pr.Owner, pr.Repo, prNumber)
-			if err != nil && debugMode {
+	if config.localMode {
+		if config.db != nil {
+			prComments, err = config.db.GetPRComments(pr.Owner, pr.Repo, prNumber)
+			if err != nil && config.debugMode {
 				fmt.Printf("  Warning: Could not fetch comments from database for %s/%s#%d: %v\n",
 					pr.Owner, pr.Repo, prNumber, err)
 			}
 		}
 	} else {
-		progress.addToTotal(1)
-		if !debugMode {
-			progress.display()
+		config.progress.addToTotal(1)
+		if !config.debugMode {
+			config.progress.display()
 		}
 
-		retryErr := retryWithBackoff(ctx, func() error {
-			prComments, _, err = client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
+		retryErr := retryWithBackoff(func() error {
+			prComments, _, err = config.client.PullRequests.ListComments(config.ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
 				ListOptions: github.ListOptions{PerPage: 100},
 			})
 			return err
-		}, debugMode, fmt.Sprintf("Comments-PR#%d", prNumber), progress)
+		}, fmt.Sprintf("Comments-PR#%d", prNumber))
 
-		progress.increment()
-		if !debugMode {
-			progress.display()
+		config.progress.increment()
+		if !config.debugMode {
+			config.progress.display()
 		}
 
 		if retryErr != nil {
 			err = retryErr
 		}
 
-		if err == nil && db != nil {
+		if err == nil && config.db != nil {
 			for _, comment := range prComments {
-				_ = db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment, debugMode)
+				_ = config.db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment, config.debugMode)
 			}
 		}
 	}
@@ -918,16 +940,16 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs *sync.Map, activities []PRActivity, debugMode bool, progress *Progress, allowedRepos map[string]bool, db *Database) []PRActivity {
+func collectActivityFromEvents(seenPRs *sync.Map, activities []PRActivity) []PRActivity {
 	opts := &github.ListOptions{PerPage: 100}
 
-	if debugMode {
+	if config.debugMode {
 		fmt.Println("Checking recent activity events...")
 	}
 	totalPRs := 0
 
 	for page := range 3 {
-		if debugMode {
+		if config.debugMode {
 			fmt.Printf("  [Events] Fetching page %d...\n", page+1)
 		}
 
@@ -935,14 +957,14 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 		var resp *github.Response
 		var err error
 
-		retryErr := retryWithBackoff(ctx, func() error {
-			events, resp, err = client.Activity.ListEventsPerformedByUser(ctx, username, false, opts)
+		retryErr := retryWithBackoff(func() error {
+			events, resp, err = config.client.Activity.ListEventsPerformedByUser(config.ctx, config.username, false, opts)
 			return err
-		}, debugMode, fmt.Sprintf("Events-page%d", page+1), progress)
+		}, fmt.Sprintf("Events-page%d", page+1))
 
-		progress.increment()
-		if !debugMode {
-			progress.display()
+		config.progress.increment()
+		if !config.debugMode {
+			config.progress.display()
 		}
 
 		if retryErr != nil {
@@ -968,7 +990,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 				}
 				owner, repo := parts[0], parts[1]
 
-				if !isRepoAllowed(owner, repo, allowedRepos) {
+				if !isRepoAllowed(owner, repo) {
 					continue
 				}
 
@@ -997,22 +1019,22 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 					_, seen := seenPRs.LoadOrStore(prKey, true)
 
 					if !seen {
-						progress.addToTotal(1)
-						if !debugMode {
-							progress.display()
+						config.progress.addToTotal(1)
+						if !config.debugMode {
+							config.progress.display()
 						}
 
 						var pr *github.PullRequest
 						var prErr error
 
-						retryErr := retryWithBackoff(ctx, func() error {
-							pr, _, prErr = client.PullRequests.Get(ctx, owner, repo, prNumber)
+						retryErr := retryWithBackoff(func() error {
+							pr, _, prErr = config.client.PullRequests.Get(config.ctx, owner, repo, prNumber)
 							return prErr
-						}, debugMode, fmt.Sprintf("Events-PR#%d", prNumber), progress)
+						}, fmt.Sprintf("Events-PR#%d", prNumber))
 
-						progress.increment()
-						if !debugMode {
-							progress.display()
+						config.progress.increment()
+						if !config.debugMode {
+							config.progress.display()
 						}
 
 						if retryErr != nil || pr.GetState() != "open" {
@@ -1021,14 +1043,14 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 
 						hasUpdates := false
 						label := "Recent Activity"
-						if db != nil {
-							cachedPR, err := db.GetPullRequest(owner, repo, prNumber)
+						if config.db != nil {
+							cachedPR, err := config.db.GetPullRequest(owner, repo, prNumber)
 							if err == nil {
 								if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
 									hasUpdates = true
 								}
 							}
-							_ = db.SavePullRequestWithLabel(owner, repo, pr, label, debugMode)
+							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
 						}
 
 						activities = append(activities, PRActivity{
@@ -1051,7 +1073,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 		opts.Page = resp.NextPage
 	}
 
-	if debugMode {
+	if config.debugMode {
 		if totalPRs > 0 {
 			fmt.Printf("  [Events] Complete: %d PRs found\n", totalPRs)
 		} else {
@@ -1062,26 +1084,26 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs *sync.Map, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database, timeRange time.Duration) []PRActivity {
-	if localMode {
-		if db == nil {
+func collectSearchResults(query, label string, seenPRs *sync.Map, activities []PRActivity) []PRActivity {
+	if config.localMode {
+		if config.db == nil {
 			return activities
 		}
 
-		allPRs, prLabels, err := db.GetAllPullRequestsWithLabels(debugMode)
+		allPRs, prLabels, err := config.db.GetAllPullRequestsWithLabels(config.debugMode)
 		if err != nil {
-			if debugMode {
+			if config.debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
 			}
 			return activities
 		}
 
-		if debugMode {
+		if config.debugMode {
 			fmt.Printf("  [%s] Loading from database...\n", label)
 		}
 
 		totalFound := 0
-		cutoffTime := time.Now().Add(-timeRange)
+		cutoffTime := time.Now().Add(-config.timeRange)
 		for key, pr := range allPRs {
 			storedLabel := prLabels[key]
 
@@ -1105,7 +1127,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			}
 			repo := repoParts[0]
 
-			if !isRepoAllowed(owner, repo, allowedRepos) {
+			if !isRepoAllowed(owner, repo) {
 				continue
 			}
 
@@ -1125,7 +1147,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			}
 		}
 
-		if debugMode && totalFound > 0 {
+		if config.debugMode && totalFound > 0 {
 			fmt.Printf("  [%s] Complete: %d PRs found\n", label, totalFound)
 		}
 
@@ -1140,7 +1162,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 
 	page := 1
 	for {
-		if debugMode {
+		if config.debugMode {
 			fmt.Printf("  [%s] Searching page %d with query: %s\n", label, page, query)
 		}
 
@@ -1148,23 +1170,23 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		var resp *github.Response
 		var err error
 
-		retryErr := retryWithBackoff(ctx, func() error {
-			result, resp, err = client.Search.Issues(ctx, query, opts)
+		retryErr := retryWithBackoff(func() error {
+			result, resp, err = config.client.Search.Issues(config.ctx, query, opts)
 			return err
-		}, debugMode, fmt.Sprintf("%s-page%d", label, page), progress)
+		}, fmt.Sprintf("%s-page%d", label, page))
 
-		progress.increment()
-		if !debugMode {
-			progress.display()
+		config.progress.increment()
+		if !config.debugMode {
+			config.progress.display()
 		}
 
 		if page == 1 && resp != nil && resp.NextPage != 0 {
 			lastPage := resp.LastPage
 			if lastPage > 1 {
 				additionalPages := lastPage - 1
-				progress.addToTotal(additionalPages)
-				if !debugMode {
-					progress.display()
+				config.progress.addToTotal(additionalPages)
+				if !config.debugMode {
+					config.progress.display()
 				}
 			}
 		}
@@ -1177,7 +1199,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			return activities
 		}
 
-		if debugMode && resp != nil {
+		if config.debugMode && resp != nil {
 			fmt.Printf("  [%s] API Response: %d results, Rate: %d/%d\n", label, len(result.Issues), resp.Rate.Remaining, resp.Rate.Limit)
 		}
 
@@ -1196,7 +1218,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			owner := parts[len(parts)-2]
 			repo := parts[len(parts)-1]
 
-			if !isRepoAllowed(owner, repo, allowedRepos) {
+			if !isRepoAllowed(owner, repo) {
 				continue
 			}
 
@@ -1205,22 +1227,22 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			_, seen := seenPRs.LoadOrStore(prKey, true)
 
 			if !seen {
-				progress.addToTotal(1)
-				if !debugMode {
-					progress.display()
+				config.progress.addToTotal(1)
+				if !config.debugMode {
+					config.progress.display()
 				}
 
 				var pr *github.PullRequest
 				var prErr error
 
-				retryErr := retryWithBackoff(ctx, func() error {
-					pr, _, prErr = client.PullRequests.Get(ctx, owner, repo, *issue.Number)
+				retryErr := retryWithBackoff(func() error {
+					pr, _, prErr = config.client.PullRequests.Get(config.ctx, owner, repo, *issue.Number)
 					return prErr
-				}, debugMode, fmt.Sprintf("%s-PR#%d", label, *issue.Number), progress)
+				}, fmt.Sprintf("%s-PR#%d", label, *issue.Number))
 
-				progress.increment()
-				if !debugMode {
-					progress.display()
+				config.progress.increment()
+				if !config.debugMode {
+					config.progress.display()
 				}
 
 				if retryErr != nil {
@@ -1237,12 +1259,12 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 				}
 
 				hasUpdates := false
-				if db != nil {
-					cachedPR, err := db.GetPullRequest(owner, repo, *issue.Number)
+				if config.db != nil {
+					cachedPR, err := config.db.GetPullRequest(owner, repo, *issue.Number)
 					if err == nil {
 						if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
 							hasUpdates = true
-							if debugMode {
+							if config.debugMode {
 								fmt.Printf("  [%s] Update detected: %s/%s#%d (API: %s > DB: %s)\n",
 									label, owner, repo, *issue.Number,
 									pr.GetUpdatedAt().Format("2006-01-02 15:04:05"),
@@ -1250,7 +1272,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 							}
 						}
 					}
-					_ = db.SavePullRequestWithLabel(owner, repo, pr, label, debugMode)
+					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
 				}
 
 				activities = append(activities, PRActivity{
@@ -1266,7 +1288,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			}
 		}
 
-		if debugMode {
+		if config.debugMode {
 			fmt.Printf("  [%s] Page %d: found %d new PRs (total: %d)\n", label, page, pageResults, totalFound)
 		}
 
@@ -1277,14 +1299,14 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		page++
 	}
 
-	if debugMode && totalFound > 0 {
+	if config.debugMode && totalFound > 0 {
 		fmt.Printf("  [%s] Complete: %d PRs found\n", label, totalFound)
 	}
 
 	return activities
 }
 
-func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool, showLinks bool) {
+func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool) {
 	dateStr := "          "
 	if pr.UpdatedAt != nil {
 		dateStr = pr.UpdatedAt.Format("2006/01/02")
@@ -1307,12 +1329,12 @@ func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates boo
 		*pr.Title,
 	)
 
-	if showLinks && pr.HTMLURL != nil {
+	if config.showLinks && pr.HTMLURL != nil {
 		fmt.Printf("   🔗 %s\n", *pr.HTMLURL)
 	}
 }
 
-func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool, showLinks bool) {
+func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool) {
 	dateStr := "          "
 	if issue.UpdatedAt != nil {
 		dateStr = issue.UpdatedAt.Format("2006/01/02")
@@ -1345,31 +1367,31 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 		*issue.Title,
 	)
 
-	if showLinks && issue.HTMLURL != nil {
+	if config.showLinks && issue.HTMLURL != nil {
 		fmt.Printf("%s🔗 %s\n", linkIndent, *issue.HTMLURL)
 	}
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues *sync.Map, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database, timeRange time.Duration) []IssueActivity {
-	if localMode {
-		if db == nil {
+func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueActivities []IssueActivity) []IssueActivity {
+	if config.localMode {
+		if config.db == nil {
 			return issueActivities
 		}
 
-		allIssues, issueLabels, err := db.GetAllIssuesWithLabels(debugMode)
+		allIssues, issueLabels, err := config.db.GetAllIssuesWithLabels(config.debugMode)
 		if err != nil {
-			if debugMode {
+			if config.debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
 			}
 			return issueActivities
 		}
 
-		if debugMode {
+		if config.debugMode {
 			fmt.Printf("  [%s] Loading from database...\n", label)
 		}
 
 		totalFound := 0
-		cutoffTime := time.Now().Add(-timeRange)
+		cutoffTime := time.Now().Add(-config.timeRange)
 		for key, issue := range allIssues {
 			storedLabel := issueLabels[key]
 
@@ -1393,7 +1415,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			}
 			repo := repoParts[0]
 
-			if !isRepoAllowed(owner, repo, allowedRepos) {
+			if !isRepoAllowed(owner, repo) {
 				continue
 			}
 
@@ -1413,7 +1435,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			}
 		}
 
-		if debugMode && totalFound > 0 {
+		if config.debugMode && totalFound > 0 {
 			fmt.Printf("  [%s] Complete: %d issues found\n", label, totalFound)
 		}
 
@@ -1428,7 +1450,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 
 	page := 1
 	for {
-		if debugMode {
+		if config.debugMode {
 			fmt.Printf("  [%s] Searching page %d with query: %s\n", label, page, query)
 		}
 
@@ -1436,23 +1458,23 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		var resp *github.Response
 		var err error
 
-		retryErr := retryWithBackoff(ctx, func() error {
-			result, resp, err = client.Search.Issues(ctx, query, opts)
+		retryErr := retryWithBackoff(func() error {
+			result, resp, err = config.client.Search.Issues(config.ctx, query, opts)
 			return err
-		}, debugMode, fmt.Sprintf("%s-issues-page%d", label, page), progress)
+		}, fmt.Sprintf("%s-issues-page%d", label, page))
 
-		progress.increment()
-		if !debugMode {
-			progress.display()
+		config.progress.increment()
+		if !config.debugMode {
+			config.progress.display()
 		}
 
 		if page == 1 && resp != nil && resp.NextPage != 0 {
 			lastPage := resp.LastPage
 			if lastPage > 1 {
 				additionalPages := lastPage - 1
-				progress.addToTotal(additionalPages)
-				if !debugMode {
-					progress.display()
+				config.progress.addToTotal(additionalPages)
+				if !config.debugMode {
+					config.progress.display()
 				}
 			}
 		}
@@ -1465,7 +1487,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			return issueActivities
 		}
 
-		if debugMode && resp != nil {
+		if config.debugMode && resp != nil {
 			fmt.Printf("  [%s] API Response: %d results, Rate: %d/%d\n", label, len(result.Issues), resp.Rate.Remaining, resp.Rate.Limit)
 		}
 
@@ -1484,7 +1506,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			owner := parts[len(parts)-2]
 			repo := parts[len(parts)-1]
 
-			if !isRepoAllowed(owner, repo, allowedRepos) {
+			if !isRepoAllowed(owner, repo) {
 				continue
 			}
 
@@ -1494,14 +1516,14 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 
 			if !seen {
 				hasUpdates := false
-				if db != nil {
-					cachedIssue, err := db.GetIssue(owner, repo, *issue.Number)
+				if config.db != nil {
+					cachedIssue, err := config.db.GetIssue(owner, repo, *issue.Number)
 					if err == nil {
 						if issue.GetUpdatedAt().After(cachedIssue.GetUpdatedAt().Time) {
 							hasUpdates = true
 						}
 					}
-					_ = db.SaveIssueWithLabel(owner, repo, issue, label, debugMode)
+					_ = config.db.SaveIssueWithLabel(owner, repo, issue, label, config.debugMode)
 				}
 
 				issueActivities = append(issueActivities, IssueActivity{
@@ -1517,7 +1539,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			}
 		}
 
-		if debugMode {
+		if config.debugMode {
 			fmt.Printf("  [%s] Page %d: found %d new issues (total: %d)\n", label, page, pageResults, totalFound)
 		}
 
@@ -1528,7 +1550,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		page++
 	}
 
-	if debugMode && totalFound > 0 {
+	if config.debugMode && totalFound > 0 {
 		fmt.Printf("  [%s] Complete: %d issues found\n", label, totalFound)
 	}
 
