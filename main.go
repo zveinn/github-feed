@@ -592,7 +592,7 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		query := pq.query
 		label := pq.label
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, query, label, &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
+			results := collectSearchResults(ctx, client, query, label, &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db, timeRange)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
@@ -608,7 +608,7 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		})
 	} else {
 		prWg.Go(func() {
-			results := collectSearchResults(ctx, client, "", "Recent Activity", &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
+			results := collectSearchResults(ctx, client, "", "Recent Activity", &seenPRs, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db, timeRange)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
@@ -642,7 +642,7 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		query := iq.query
 		label := iq.label
 		issueWg.Go(func() {
-			results := collectIssueSearchResults(ctx, client, query, label, &seenIssues, []IssueActivity{}, debugMode, progress, localMode, allowedRepos, db)
+			results := collectIssueSearchResults(ctx, client, query, label, &seenIssues, []IssueActivity{}, debugMode, progress, localMode, allowedRepos, db, timeRange)
 			issuesMu.Lock()
 			issueActivities = append(issueActivities, results...)
 			issuesMu.Unlock()
@@ -1062,7 +1062,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs *sync.Map, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []PRActivity {
+func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs *sync.Map, activities []PRActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database, timeRange time.Duration) []PRActivity {
 	if localMode {
 		if db == nil {
 			return activities
@@ -1081,10 +1081,15 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		}
 
 		totalFound := 0
+		cutoffTime := time.Now().Add(-timeRange)
 		for key, pr := range allPRs {
 			storedLabel := prLabels[key]
 
 			if storedLabel != label {
+				continue
+			}
+
+			if pr.GetUpdatedAt().Time.Before(cutoffTime) {
 				continue
 			}
 
@@ -1345,7 +1350,7 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 	}
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues *sync.Map, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database) []IssueActivity {
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues *sync.Map, issueActivities []IssueActivity, debugMode bool, progress *Progress, localMode bool, allowedRepos map[string]bool, db *Database, timeRange time.Duration) []IssueActivity {
 	if localMode {
 		if db == nil {
 			return issueActivities
@@ -1364,10 +1369,15 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		}
 
 		totalFound := 0
+		cutoffTime := time.Now().Add(-timeRange)
 		for key, issue := range allIssues {
 			storedLabel := issueLabels[key]
 
 			if storedLabel != label {
+				continue
+			}
+
+			if issue.GetUpdatedAt().Time.Before(cutoffTime) {
 				continue
 			}
 
