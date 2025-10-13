@@ -94,9 +94,49 @@ func (p *Progress) display() {
 		barColor.Sprintf("%.0f%%", percentage))
 }
 
+func (p *Progress) displayWithWarning(message string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	percentage := float64(p.current) / float64(p.total) * 100
+
+	// Build the progress bar with colors
+	filled := int(percentage / 2) // 50 chars for 100%
+	var barContent string
+	for i := range 50 {
+		if i < filled {
+			barContent += "="
+		} else if i == filled {
+			barContent += ">"
+		} else {
+			barContent += " "
+		}
+	}
+
+	// Choose color based on percentage
+	var barColor *color.Color
+	if percentage < 33 {
+		barColor = color.New(color.FgRed)
+	} else if percentage < 66 {
+		barColor = color.New(color.FgYellow)
+	} else {
+		barColor = color.New(color.FgGreen)
+	}
+
+	// Clear the line first
+	// fmt.Printf("\r" + strings.Repeat(" ", 120) + "\r")
+
+	// Format: [colored bar] current/total (percentage%) ! warning message
+	fmt.Printf("\r[%s] %s/%s (%s) %s ",
+		barColor.Sprint(barContent),
+		color.New(color.FgCyan).Sprint(p.current),
+		color.New(color.FgCyan).Sprint(p.total),
+		barColor.Sprintf("%.0f%%", percentage),
+		color.New(color.FgYellow).Sprint("! "+message))
+}
+
 // retryWithBackoff executes an API call with exponential backoff and infinite retries
 // It detects rate limit errors and waits appropriately before retrying
-func retryWithBackoff(ctx context.Context, operation func() error, debugMode bool, operationName string) error {
+func retryWithBackoff(ctx context.Context, operation func() error, debugMode bool, operationName string, progress *Progress) error {
 	const (
 		initialBackoff = 1 * time.Second
 		maxBackoff     = 30 * time.Second
@@ -125,16 +165,23 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 				fmt.Printf("  [%s] Rate limit hit (attempt %d), waiting %v before retry...\n",
 					operationName, attempt, waitTime)
 			} else {
-				// Clear progress bar and show warning
-				fmt.Printf("\r" + strings.Repeat(" ", 80) + "\r")
-				fmt.Printf("⚠ Rate limit hit, waiting %v before retry...\n", waitTime)
-			}
+				// Show countdown with progress bar
+				ticker := time.NewTicker(1 * time.Second)
+				defer ticker.Stop()
 
-			// Wait for the backoff period
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(waitTime):
+				remaining := int(waitTime.Seconds())
+				for remaining > 0 {
+					if progress != nil {
+						progress.displayWithWarning(fmt.Sprintf("Rate limit hit, retrying in %ds", remaining))
+					}
+
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-ticker.C:
+						remaining--
+					}
+				}
 			}
 
 			// Increase backoff exponentially
@@ -146,12 +193,24 @@ func retryWithBackoff(ctx context.Context, operation func() error, debugMode boo
 			if debugMode {
 				fmt.Printf("  [%s] Error (attempt %d): %v, waiting %v before retry...\n",
 					operationName, attempt, err, waitTime)
-			}
+			} else {
+				// Show countdown with progress bar for non-rate-limit errors too
+				ticker := time.NewTicker(1 * time.Second)
+				defer ticker.Stop()
 
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(waitTime):
+				remaining := int(waitTime.Seconds())
+				for remaining > 0 {
+					if progress != nil {
+						progress.displayWithWarning(fmt.Sprintf("API error, retrying in %ds", remaining))
+					}
+
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-ticker.C:
+						remaining--
+					}
+				}
 			}
 
 			// Slower increase for non-rate-limit errors
@@ -344,7 +403,7 @@ func main() {
 
 	// Create ~/.github-feed directory if it doesn't exist
 	configDir := filepath.Join(homeDir, ".github-feed")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		fmt.Printf("Error: Could not create config directory %s: %v\n", configDir, err)
 		os.Exit(1)
 	}
@@ -367,7 +426,7 @@ GITHUB_USERNAME=
 # Leave empty to allow all repos
 ALLOWED_REPOS=
 `
-		if err := os.WriteFile(envPath, []byte(envTemplate), 0600); err != nil {
+		if err := os.WriteFile(envPath, []byte(envTemplate), 0o600); err != nil {
 			fmt.Printf("Warning: Could not create .env file at %s: %v\n", envPath, err)
 		}
 	}
@@ -476,7 +535,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	retryErr := retryWithBackoff(ctx, func() error {
 		rateLimits, _, err = client.RateLimit.Get(ctx)
 		return err
-	}, debugMode, "RateLimitCheck")
+	}, debugMode, "RateLimitCheck", nil)
 
 	if retryErr != nil {
 		return fmt.Errorf("failed to fetch rate limit: %w", retryErr)
@@ -872,7 +931,7 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 				ListOptions: github.ListOptions{PerPage: 100},
 			})
 			return err
-		}, debugMode, fmt.Sprintf("Comments-PR#%d", prNumber))
+		}, debugMode, fmt.Sprintf("Comments-PR#%d", prNumber), progress)
 
 		// Increment progress after API call
 		progress.increment()
@@ -972,7 +1031,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 		retryErr := retryWithBackoff(ctx, func() error {
 			events, resp, err = client.Activity.ListEventsPerformedByUser(ctx, username, false, opts)
 			return err
-		}, debugMode, fmt.Sprintf("Events-page%d", page+1))
+		}, debugMode, fmt.Sprintf("Events-page%d", page+1), progress)
 
 		// Increment progress after API call
 		progress.increment()
@@ -1055,7 +1114,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 						retryErr := retryWithBackoff(ctx, func() error {
 							pr, _, prErr = client.PullRequests.Get(ctx, owner, repo, prNumber)
 							return prErr
-						}, debugMode, fmt.Sprintf("Events-PR#%d", prNumber))
+						}, debugMode, fmt.Sprintf("Events-PR#%d", prNumber), progress)
 
 						// Increment progress after API call
 						progress.increment()
@@ -1201,7 +1260,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		retryErr := retryWithBackoff(ctx, func() error {
 			result, resp, err = client.Search.Issues(ctx, query, opts)
 			return err
-		}, debugMode, fmt.Sprintf("%s-page%d", label, page))
+		}, debugMode, fmt.Sprintf("%s-page%d", label, page), progress)
 
 		// Increment progress after API call
 		progress.increment()
@@ -1279,7 +1338,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 				retryErr := retryWithBackoff(ctx, func() error {
 					pr, _, prErr = client.PullRequests.Get(ctx, owner, repo, *issue.Number)
 					return prErr
-				}, debugMode, fmt.Sprintf("%s-PR#%d", label, *issue.Number))
+				}, debugMode, fmt.Sprintf("%s-PR#%d", label, *issue.Number), progress)
 
 				// Increment progress after API call
 				progress.increment()
@@ -1515,7 +1574,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		retryErr := retryWithBackoff(ctx, func() error {
 			result, resp, err = client.Search.Issues(ctx, query, opts)
 			return err
-		}, debugMode, fmt.Sprintf("%s-issues-page%d", label, page))
+		}, debugMode, fmt.Sprintf("%s-issues-page%d", label, page), progress)
 
 		// Increment progress after API call
 		progress.increment()
