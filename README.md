@@ -9,7 +9,7 @@ A fast, colorful CLI tool for monitoring GitHub pull requests and issues across 
 - 📊 **Smart Cross-Referencing** - Automatically links related PRs and issues
 - ⚡ **Real-Time Progress Bar** - Visual feedback with color-coded completion status
 - 🔍 **Comprehensive Search** - Tracks authored, mentioned, assigned, commented, and reviewed items
-- 📅 **Time Filtering** - View items from the last month by default (configurable with `--months`)
+- 📅 **Time Filtering** - View items from the last month by default (configurable with `--time`)
 - 🎯 **Organized Display** - Separates open, merged, and closed items into clear sections
 
 ## Installation
@@ -71,11 +71,20 @@ export ALLOWED_REPOS="user/repo1,user/repo2"  # Optional: filter to specific rep
 # Monitor PRs and issues from the last month (default, fetches from GitHub)
 github-feed
 
-# Show items from the last 3 months
-github-feed --months 3
+# Show items from the last 3 hours
+github-feed --time 3h
 
-# Show items from the last 12 months
-github-feed --months=12
+# Show items from the last 2 days
+github-feed --time 2d
+
+# Show items from the last 3 weeks
+github-feed --time 3w
+
+# Show items from the last 6 months
+github-feed --time 6m
+
+# Show items from the last year
+github-feed --time 1y
 
 # Show detailed logging output
 github-feed --debug
@@ -90,14 +99,14 @@ github-feed --links
 github-feed --allowed-repos="user/repo1,user/repo2"
 
 # Combine flags
-github-feed --local --months 12 --debug --links --allowed-repos="miniohq/ec,tunnels-is/tunnels"
+github-feed --local --time 2w --debug --links --allowed-repos="miniohq/ec,tunnels-is/tunnels"
 ```
 
 ### Command Line Options
 
 | Flag | Description |
 |------|-------------|
-| `--months MONTHS` | Show items from the last X months, both open and closed (default: 1) |
+| `--time RANGE` | Show items from the last time range (default: `1m`)<br>Examples: `1h` (hour), `2d` (days), `3w` (weeks), `4m` (months), `1y` (year) |
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--links` | Show hyperlinks (with 🔗 icon) underneath each PR and issue |
@@ -148,8 +157,8 @@ github-feed --local --months 12 --debug --links --allowed-repos="miniohq/ec,tunn
 
 4. **Smart Filtering**:
    - Shows both open and closed items from the specified time period
-   - **Default**: Items updated in last month
-   - **Custom** (`--months X`): Items updated in last X months
+   - **Default**: Items updated in last month (`1m`)
+   - **Custom**: Use `--time` with values like `1h`, `2d`, `3w`, `6m`, `1y`
 
 ### Offline Mode (`--local`)
 

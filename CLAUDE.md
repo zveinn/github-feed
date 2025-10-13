@@ -16,7 +16,11 @@ go build -o github-feed main.go db.go
 ./github-feed
 
 # Run with flags
-./github-feed --months 3      # Show items from last 3 months (default: 1)
+./github-feed --time 3h        # Show items from last 3 hours
+./github-feed --time 2d        # Show items from last 2 days
+./github-feed --time 3w        # Show items from last 3 weeks
+./github-feed --time 6m        # Show items from last 6 months (default: 1m)
+./github-feed --time 1y        # Show items from last year
 ./github-feed --debug          # Show detailed API logging instead of progress bar
 ./github-feed --local          # Use local database instead of GitHub API (offline mode)
 ./github-feed --links          # Show hyperlinks underneath each PR/issue
@@ -114,12 +118,17 @@ The codebase uses `sync.WaitGroup` with goroutines (via `.Go()` method) for para
 
 Progress tracking is thread-safe (main.go:48-58) and updated after each API call across all goroutines. The progress bar dynamically adjusts its total as new work is discovered.
 
-### Date Filtering
+### Time Filtering
 
-Controlled by `--months` flag (default: 1):
+Controlled by `--time` flag (default: `1m`):
 - Shows both open and closed items updated in the specified time period
-- Default: Items updated in last month
-- Custom: `--months X` shows items from last X months
+- Default: Items updated in last month (`1m` = 30 days)
+- Supports flexible time ranges:
+  - `h` = hours (e.g., `3h` = 3 hours)
+  - `d` = days (e.g., `2d` = 2 days)
+  - `w` = weeks (e.g., `3w` = 3 weeks)
+  - `m` = months (e.g., `6m` = 6 months, approximated as 30 days each)
+  - `y` = years (e.g., `1y` = 1 year, approximated as 365 days)
 - No separate state filtering - shows all states (open/merged/closed) from the time period
 
 ## GitHub API Integration
@@ -152,7 +161,8 @@ Key functions:
 
 ## Command-Line Flags
 
-- `--months X`: Show items from last X months (default: 1)
+- `--time RANGE`: Show items from last time range (default: `1m`)
+  - Examples: `1h` (hour), `2d` (days), `3w` (weeks), `4m` (months), `1y` (year)
 - `--debug`: Show detailed API logging instead of progress bar
 - `--local`: Use local database instead of GitHub API (offline mode, no token required)
 - `--links`: Show hyperlinks (🔗) underneath each PR/issue

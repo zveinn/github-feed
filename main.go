@@ -176,10 +176,48 @@ func loadEnvFile(path string) error {
 	return scanner.Err()
 }
 
+// parseTimeRange parses time range strings like "1h", "2d", "3w", "4m", "1y"
+// Returns the duration and an error if parsing fails
+func parseTimeRange(timeStr string) (time.Duration, error) {
+	if len(timeStr) < 2 {
+		return 0, fmt.Errorf("invalid time range format: %s (expected format like 1h, 2d, 3w, 4m, 1y)", timeStr)
+	}
+
+	// Extract number and unit
+	numStr := timeStr[:len(timeStr)-1]
+	unit := timeStr[len(timeStr)-1:]
+
+	num, err := strconv.Atoi(numStr)
+	if err != nil || num < 1 {
+		return 0, fmt.Errorf("invalid time range number: %s (must be a positive integer)", numStr)
+	}
+
+	// Convert to duration based on unit
+	var duration time.Duration
+	switch unit {
+	case "h":
+		duration = time.Duration(num) * time.Hour
+	case "d":
+		duration = time.Duration(num) * 24 * time.Hour
+	case "w":
+		duration = time.Duration(num) * 7 * 24 * time.Hour
+	case "m":
+		// Approximate month as 30 days
+		duration = time.Duration(num) * 30 * 24 * time.Hour
+	case "y":
+		// Approximate year as 365 days
+		duration = time.Duration(num) * 365 * 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("invalid time unit: %s (use h=hours, d=days, w=weeks, m=months, y=years)", unit)
+	}
+
+	return duration, nil
+}
+
 func main() {
 	// Parse command line arguments
 	var username string
-	var months int = 1 // Default to 1 month
+	var timeRange time.Duration = 30 * 24 * time.Hour // Default to 1 month (30 days)
 	var debugMode bool
 	var localMode bool
 	var showLinks bool
@@ -188,28 +226,25 @@ func main() {
 	// Parse arguments
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
-		if arg == "--months" || strings.HasPrefix(arg, "--months=") {
-			if strings.HasPrefix(arg, "--months=") {
-				monthsStr := strings.TrimPrefix(arg, "--months=")
-				m, err := strconv.Atoi(monthsStr)
-				if err != nil || m < 1 {
-					fmt.Println("Error: --months must be a positive number (e.g., --months=3)")
-					os.Exit(1)
-				}
-				months = m
+		if arg == "--time" || strings.HasPrefix(arg, "--time=") {
+			var timeStr string
+			if strings.HasPrefix(arg, "--time=") {
+				timeStr = strings.TrimPrefix(arg, "--time=")
 			} else if i+1 < len(os.Args) {
-				monthsStr := os.Args[i+1]
-				m, err := strconv.Atoi(monthsStr)
-				if err != nil || m < 1 {
-					fmt.Println("Error: --months must be a positive number (e.g., --months 3)")
-					os.Exit(1)
-				}
-				months = m
+				timeStr = os.Args[i+1]
 				i++ // Skip next argument
 			} else {
-				fmt.Println("Error: --months requires a number")
+				fmt.Println("Error: --time requires a value (e.g., --time 1h, --time 2d, --time 3w, --time 4m, --time 1y)")
 				os.Exit(1)
 			}
+
+			duration, err := parseTimeRange(timeStr)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				fmt.Println("Examples: --time 1h (1 hour), --time 2d (2 days), --time 3w (3 weeks), --time 4m (4 months), --time 1y (1 year)")
+				os.Exit(1)
+			}
+			timeRange = duration
 		} else if arg == "--debug" {
 			debugMode = true
 		} else if arg == "--local" {
@@ -331,8 +366,9 @@ ALLOWED_REPOS=
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai [--months MONTHS] [--debug] [--local] [--links] [--allowed-repos REPOS] [username]")
-		fmt.Println("  --months MONTHS: Show items from the last X months (default: 1)")
+		fmt.Println("Usage: gitai [--time RANGE] [--debug] [--local] [--links] [--allowed-repos REPOS] [username]")
+		fmt.Println("  --time RANGE: Show items from the last time range (default: 1m)")
+		fmt.Println("                Examples: 1h (1 hour), 2d (2 days), 3w (3 weeks), 4m (4 months), 1y (1 year)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
 		fmt.Println("  --links: Show hyperlinks underneath each PR/issue")
@@ -344,13 +380,13 @@ ALLOWED_REPOS=
 
 	if debugMode {
 		fmt.Printf("Monitoring GitHub PR activity for user: %s\n", username)
-		fmt.Printf("Showing items from the last %d month(s)\n", months)
+		fmt.Printf("Showing items from the last %v\n", timeRange)
 	}
 	if debugMode {
 		fmt.Println("Debug mode enabled")
 	}
 
-	fetchAndDisplayActivity(token, username, months, debugMode, localMode, showLinks, allowedRepos, db)
+	fetchAndDisplayActivity(token, username, timeRange, debugMode, localMode, showLinks, allowedRepos, db)
 }
 
 // isRepoAllowed checks if a repository is in the allowed list
@@ -405,7 +441,7 @@ func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) 
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string, months int, debugMode bool, localMode bool, showLinks bool, allowedRepos map[string]bool, db *Database) {
+func fetchAndDisplayActivity(token, username string, timeRange time.Duration, debugMode bool, localMode bool, showLinks bool, allowedRepos map[string]bool, db *Database) {
 	startTime := time.Now()
 
 	ctx := context.Background()
@@ -444,9 +480,9 @@ func fetchAndDisplayActivity(token, username string, months int, debugMode bool,
 		progress.display()
 	}
 
-	// Calculate date filter from specified months back
+	// Calculate date filter from specified time range back
 	// No state filter - show both open and closed items
-	dateAgo := time.Now().AddDate(0, -months, 0).Format("2006-01-02")
+	dateAgo := time.Now().Add(-timeRange).Format("2006-01-02")
 	dateFilter := fmt.Sprintf("updated:>=%s", dateAgo)
 
 	// Use GitHub's efficient search API to find all PRs involving the user
