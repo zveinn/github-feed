@@ -1502,7 +1502,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			return issueActivities
 		}
 
-		allIssues, err := db.GetAllIssues(debugMode)
+		allIssues, issueLabels, err := db.GetAllIssuesWithLabels(debugMode)
 		if err != nil {
 			if debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
@@ -1516,6 +1516,15 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 
 		totalFound := 0
 		for key, issue := range allIssues {
+			// Get the stored label for this issue
+			storedLabel := issueLabels[key]
+
+			// Only include issues that match the requested label
+			// If issue has no stored label (old format), skip it in local mode
+			if storedLabel != label {
+				continue
+			}
+
 			// Parse owner/repo from key format: "owner/repo#number"
 			parts := strings.Split(key, "/")
 			if len(parts) < 2 {
@@ -1545,7 +1554,7 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 
 			if !seen {
 				issueActivities = append(issueActivities, IssueActivity{
-					Label:     label,
+					Label:     storedLabel,
 					Owner:     owner,
 					Repo:      repo,
 					Issue:     issue,
@@ -1658,8 +1667,8 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 							hasUpdates = true
 						}
 					}
-					// Save issue to database
-					_ = db.SaveIssue(owner, repo, issue, debugMode)
+					// Save issue to database with label
+					_ = db.SaveIssueWithLabel(owner, repo, issue, label, debugMode)
 				}
 
 				issueActivities = append(issueActivities, IssueActivity{

@@ -194,6 +194,12 @@ func (d *Database) GetPullRequestWithLabel(owner, repo string, number int) (*git
 	return pr, label, nil
 }
 
+// IssueWithLabel wraps an Issue with its activity label
+type IssueWithLabel struct {
+	Issue *github.Issue
+	Label string
+}
+
 // SaveIssue saves or updates an issue in the database
 func (d *Database) SaveIssue(owner, repo string, issue *github.Issue, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, issue.GetNumber())
@@ -222,6 +228,39 @@ func (d *Database) SaveIssue(owner, repo string, issue *github.Issue, debugMode 
 	return err
 }
 
+// SaveIssueWithLabel saves or updates an issue with its label in the database
+func (d *Database) SaveIssueWithLabel(owner, repo string, issue *github.Issue, label string, debugMode bool) error {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, issue.GetNumber())
+
+	issueWithLabel := IssueWithLabel{
+		Issue: issue,
+		Label: label,
+	}
+
+	data, err := json.Marshal(issueWithLabel)
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error marshaling issue with label %s: %v\n", key, err)
+		}
+		return fmt.Errorf("failed to marshal issue with label: %w", err)
+	}
+
+	err = d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(issuesBucket)
+		return b.Put([]byte(key), data)
+	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error saving issue with label %s: %v\n", key, err)
+		}
+	} else if debugMode {
+		fmt.Printf("  [DB] Saved issue %s with label %s\n", key, label)
+	}
+
+	return err
+}
+
 // GetIssue retrieves an issue from the database
 func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, error) {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
@@ -233,6 +272,15 @@ func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, erro
 		if data == nil {
 			return fmt.Errorf("issue not found")
 		}
+
+		// Try to unmarshal as IssueWithLabel first (new format)
+		var issueWithLabel IssueWithLabel
+		if err := json.Unmarshal(data, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
+			issue = *issueWithLabel.Issue
+			return nil
+		}
+
+		// Fall back to unmarshaling as just Issue (old format)
 		return json.Unmarshal(data, &issue)
 	})
 
@@ -240,6 +288,44 @@ func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, erro
 		return nil, err
 	}
 	return &issue, nil
+}
+
+// GetIssueWithLabel retrieves an issue with its label from the database
+func (d *Database) GetIssueWithLabel(owner, repo string, number int) (*github.Issue, string, error) {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+
+	var issue *github.Issue
+	var label string
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(issuesBucket)
+		data := b.Get([]byte(key))
+		if data == nil {
+			return fmt.Errorf("issue not found")
+		}
+
+		// Try to unmarshal as IssueWithLabel first (new format)
+		var issueWithLabel IssueWithLabel
+		if err := json.Unmarshal(data, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
+			issue = issueWithLabel.Issue
+			label = issueWithLabel.Label
+			return nil
+		}
+
+		// Fall back to unmarshaling as just Issue (old format)
+		var oldIssue github.Issue
+		if err := json.Unmarshal(data, &oldIssue); err != nil {
+			return err
+		}
+		issue = &oldIssue
+		label = "" // No label in old format
+		return nil
+	})
+
+	if err != nil {
+		return nil, "", err
+	}
+	return issue, label, nil
 }
 
 // SaveComment saves or updates a comment in the database
@@ -423,6 +509,14 @@ func (d *Database) GetAllIssues(debugMode bool) (map[string]*github.Issue, error
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(issuesBucket)
 		return b.ForEach(func(k, v []byte) error {
+			// Try to unmarshal as IssueWithLabel first (new format)
+			var issueWithLabel IssueWithLabel
+			if err := json.Unmarshal(v, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
+				issues[string(k)] = issueWithLabel.Issue
+				return nil
+			}
+
+			// Fall back to unmarshaling as just Issue (old format)
 			var issue github.Issue
 			if err := json.Unmarshal(v, &issue); err != nil {
 				if debugMode {
@@ -447,6 +541,56 @@ func (d *Database) GetAllIssues(debugMode bool) (map[string]*github.Issue, error
 	}
 
 	return issues, nil
+}
+
+// GetAllIssuesWithLabels retrieves all issues with their labels from the database
+func (d *Database) GetAllIssuesWithLabels(debugMode bool) (map[string]*github.Issue, map[string]string, error) {
+	issues := make(map[string]*github.Issue)
+	labels := make(map[string]string)
+
+	if debugMode {
+		fmt.Printf("  [DB] Reading all issues with labels from database...\n")
+	}
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(issuesBucket)
+		return b.ForEach(func(k, v []byte) error {
+			key := string(k)
+
+			// Try to unmarshal as IssueWithLabel first (new format)
+			var issueWithLabel IssueWithLabel
+			if err := json.Unmarshal(v, &issueWithLabel); err == nil && issueWithLabel.Issue != nil {
+				issues[key] = issueWithLabel.Issue
+				labels[key] = issueWithLabel.Label
+				return nil
+			}
+
+			// Fall back to unmarshaling as just Issue (old format)
+			var issue github.Issue
+			if err := json.Unmarshal(v, &issue); err != nil {
+				if debugMode {
+					fmt.Printf("  [DB] Error unmarshaling issue %s: %v\n", key, err)
+				}
+				return err
+			}
+			issues[key] = &issue
+			labels[key] = "" // No label in old format
+			return nil
+		})
+	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error reading issues: %v\n", err)
+		}
+		return nil, nil, err
+	}
+
+	if debugMode {
+		fmt.Printf("  [DB] Loaded %d issues from database\n", len(issues))
+	}
+
+	return issues, labels, nil
 }
 
 // GetAllComments retrieves all comments from the database
