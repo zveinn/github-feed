@@ -691,10 +691,19 @@ func fetchAndDisplayActivity(token, username string, timeRange time.Duration, de
 		})
 	}
 
-	// Also run event collection in parallel (skip in local mode)
+	// Also run event collection in parallel
 	if !localMode {
+		// In online mode, fetch from GitHub Events API
 		prWg.Go(func() {
 			results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, allowedRepos, db)
+			activitiesMu.Lock()
+			activities = append(activities, results...)
+			activitiesMu.Unlock()
+		})
+	} else {
+		// In local mode, fetch "Recent Activity" labeled PRs from database
+		prWg.Go(func() {
+			results := collectSearchResults(ctx, client, "", "Recent Activity", seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress, localMode, allowedRepos, db)
 			activitiesMu.Lock()
 			activities = append(activities, results...)
 			activitiesMu.Unlock()
