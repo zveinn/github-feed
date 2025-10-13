@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -91,6 +92,74 @@ func (p *Progress) display() {
 		color.New(color.FgCyan).Sprint(p.current),
 		color.New(color.FgCyan).Sprint(p.total),
 		barColor.Sprintf("%.0f%%", percentage))
+}
+
+// retryWithBackoff executes an API call with exponential backoff and infinite retries
+// It detects rate limit errors and waits appropriately before retrying
+func retryWithBackoff(ctx context.Context, operation func() error, debugMode bool, operationName string) error {
+	const (
+		initialBackoff = 1 * time.Second
+		maxBackoff     = 30 * time.Second
+		backoffFactor  = 2.0
+	)
+
+	backoff := initialBackoff
+	attempt := 1
+
+	for {
+		err := operation()
+		if err == nil {
+			return nil
+		}
+
+		// Check if it's a rate limit error
+		isRateLimitError := strings.Contains(err.Error(), "rate limit") ||
+			strings.Contains(err.Error(), "API rate limit exceeded") ||
+			strings.Contains(err.Error(), "403")
+
+		if isRateLimitError {
+			// For rate limit errors, use a longer backoff
+			waitTime := time.Duration(math.Min(float64(backoff), float64(maxBackoff)))
+
+			if debugMode {
+				fmt.Printf("  [%s] Rate limit hit (attempt %d), waiting %v before retry...\n",
+					operationName, attempt, waitTime)
+			} else {
+				// Clear progress bar and show warning
+				fmt.Printf("\r" + strings.Repeat(" ", 80) + "\r")
+				fmt.Printf("⚠ Rate limit hit, waiting %v before retry...\n", waitTime)
+			}
+
+			// Wait for the backoff period
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitTime):
+			}
+
+			// Increase backoff exponentially
+			backoff = time.Duration(float64(backoff) * backoffFactor)
+		} else {
+			// For other errors, use shorter backoff
+			waitTime := time.Duration(math.Min(float64(backoff)/2, float64(5*time.Second)))
+
+			if debugMode {
+				fmt.Printf("  [%s] Error (attempt %d): %v, waiting %v before retry...\n",
+					operationName, attempt, err, waitTime)
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitTime):
+			}
+
+			// Slower increase for non-rate-limit errors
+			backoff = time.Duration(float64(backoff) * 1.5)
+		}
+
+		attempt++
+	}
 }
 
 // getLabelColor returns a consistent color for a given label
@@ -400,9 +469,17 @@ func isRepoAllowed(owner, repo string, allowedRepos map[string]bool) bool {
 }
 
 func checkRateLimit(ctx context.Context, client *github.Client, debugMode bool) error {
-	rateLimits, _, err := client.RateLimit.Get(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to fetch rate limit: %w", err)
+	var rateLimits *github.RateLimits
+	var err error
+
+	// Wrap rate limit check with retry logic
+	retryErr := retryWithBackoff(ctx, func() error {
+		rateLimits, _, err = client.RateLimit.Get(ctx)
+		return err
+	}, debugMode, "RateLimitCheck")
+
+	if retryErr != nil {
+		return fmt.Errorf("failed to fetch rate limit: %w", retryErr)
 	}
 
 	core := rateLimits.Core
@@ -790,14 +867,22 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 		}
 
 		// Fetch comments from GitHub API in online mode
-		prComments, _, err = client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
-			ListOptions: github.ListOptions{PerPage: 100},
-		})
+		retryErr := retryWithBackoff(ctx, func() error {
+			prComments, _, err = client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
+				ListOptions: github.ListOptions{PerPage: 100},
+			})
+			return err
+		}, debugMode, fmt.Sprintf("Comments-PR#%d", prNumber))
 
 		// Increment progress after API call
 		progress.increment()
 		if !debugMode {
 			progress.display()
+		}
+
+		// If retry failed, set err for the later check
+		if retryErr != nil {
+			err = retryErr
 		}
 
 		// Save comments to database for future local mode use
@@ -879,7 +964,15 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 		if debugMode {
 			fmt.Printf("  [Events] Fetching page %d...\n", page+1)
 		}
-		events, resp, err := client.Activity.ListEventsPerformedByUser(ctx, username, false, opts)
+
+		var events []*github.Event
+		var resp *github.Response
+		var err error
+
+		retryErr := retryWithBackoff(ctx, func() error {
+			events, resp, err = client.Activity.ListEventsPerformedByUser(ctx, username, false, opts)
+			return err
+		}, debugMode, fmt.Sprintf("Events-page%d", page+1))
 
 		// Increment progress after API call
 		progress.increment()
@@ -887,8 +980,8 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 			progress.display()
 		}
 
-		if err != nil {
-			fmt.Printf("Error fetching user events: %v\n", err)
+		if retryErr != nil {
+			fmt.Printf("Error fetching user events after retries: %v\n", retryErr)
 			break
 		}
 
@@ -956,7 +1049,13 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 						}
 
 						// Fetch the PR details
-						pr, _, err := client.PullRequests.Get(ctx, owner, repo, prNumber)
+						var pr *github.PullRequest
+						var prErr error
+
+						retryErr := retryWithBackoff(ctx, func() error {
+							pr, _, prErr = client.PullRequests.Get(ctx, owner, repo, prNumber)
+							return prErr
+						}, debugMode, fmt.Sprintf("Events-PR#%d", prNumber))
 
 						// Increment progress after API call
 						progress.increment()
@@ -964,7 +1063,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 							progress.display()
 						}
 
-						if err != nil || pr.GetState() != "open" {
+						if retryErr != nil || pr.GetState() != "open" {
 							continue
 						}
 
@@ -1093,7 +1192,16 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 		if debugMode {
 			fmt.Printf("  [%s] Searching page %d with query: %s\n", label, page, query)
 		}
-		result, resp, err := client.Search.Issues(ctx, query, opts)
+
+		var result *github.IssuesSearchResult
+		var resp *github.Response
+		var err error
+
+		// Wrap API call with retry logic
+		retryErr := retryWithBackoff(ctx, func() error {
+			result, resp, err = client.Search.Issues(ctx, query, opts)
+			return err
+		}, debugMode, fmt.Sprintf("%s-page%d", label, page))
 
 		// Increment progress after API call
 		progress.increment()
@@ -1113,8 +1221,8 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			}
 		}
 
-		if err != nil {
-			fmt.Printf("  [%s] Error searching: %v\n", label, err)
+		if retryErr != nil {
+			fmt.Printf("  [%s] Error searching after retries: %v\n", label, retryErr)
 			if resp != nil {
 				fmt.Printf("  [%s] Rate limit remaining: %d/%d\n", label, resp.Rate.Remaining, resp.Rate.Limit)
 			}
@@ -1165,7 +1273,13 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 				}
 
 				// Fetch the actual PR to get more details
-				pr, _, err := client.PullRequests.Get(ctx, owner, repo, *issue.Number)
+				var pr *github.PullRequest
+				var prErr error
+
+				retryErr := retryWithBackoff(ctx, func() error {
+					pr, _, prErr = client.PullRequests.Get(ctx, owner, repo, *issue.Number)
+					return prErr
+				}, debugMode, fmt.Sprintf("%s-PR#%d", label, *issue.Number))
 
 				// Increment progress after API call
 				progress.increment()
@@ -1173,9 +1287,9 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 					progress.display()
 				}
 
-				if err != nil {
+				if retryErr != nil {
 					// Log the error but still try to show the PR with limited info
-					fmt.Printf("  [%s] Warning: Could not fetch details for %s/%s#%d: %v\n", label, owner, repo, *issue.Number, err)
+					fmt.Printf("  [%s] Warning: Could not fetch details for %s/%s#%d: %v\n", label, owner, repo, *issue.Number, retryErr)
 
 					// Create a minimal PR object from the issue data
 					pr = &github.PullRequest{
@@ -1392,7 +1506,16 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 		if debugMode {
 			fmt.Printf("  [%s] Searching page %d with query: %s\n", label, page, query)
 		}
-		result, resp, err := client.Search.Issues(ctx, query, opts)
+
+		var result *github.IssuesSearchResult
+		var resp *github.Response
+		var err error
+
+		// Wrap API call with retry logic
+		retryErr := retryWithBackoff(ctx, func() error {
+			result, resp, err = client.Search.Issues(ctx, query, opts)
+			return err
+		}, debugMode, fmt.Sprintf("%s-issues-page%d", label, page))
 
 		// Increment progress after API call
 		progress.increment()
@@ -1412,8 +1535,8 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			}
 		}
 
-		if err != nil {
-			fmt.Printf("  [%s] Error searching: %v\n", label, err)
+		if retryErr != nil {
+			fmt.Printf("  [%s] Error searching after retries: %v\n", label, retryErr)
 			if resp != nil {
 				fmt.Printf("  [%s] Rate limit remaining: %d/%d\n", label, resp.Rate.Remaining, resp.Rate.Limit)
 			}
