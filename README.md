@@ -178,6 +178,15 @@ GitAI monitors GitHub API rate limits and will warn you when running low:
 
 Rate limit status is displayed in debug mode.
 
+### Automatic Retry & Backoff
+
+When rate limits are hit, GitAI automatically retries with exponential backoff:
+- Detects rate limit errors (429, 403 responses)
+- Waits progressively longer between retries (1s → 2s → 4s → ... up to 30s max)
+- Continues indefinitely until the request succeeds
+- Shows clear warnings: `⚠ Rate limit hit, waiting [duration] before retry...`
+- No manual intervention required - the tool handles rate limits gracefully
+
 ## Troubleshooting
 
 ### "GITHUB_TOKEN environment variable is required"
