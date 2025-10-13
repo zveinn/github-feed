@@ -60,6 +60,12 @@ func (d *Database) Close() error {
 	return d.db.Close()
 }
 
+// PRWithLabel wraps a PullRequest with its activity label
+type PRWithLabel struct {
+	PR    *github.PullRequest
+	Label string
+}
+
 // SavePullRequest saves or updates a pull request in the database
 func (d *Database) SavePullRequest(owner, repo string, pr *github.PullRequest, debugMode bool) error {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, pr.GetNumber())
@@ -88,6 +94,39 @@ func (d *Database) SavePullRequest(owner, repo string, pr *github.PullRequest, d
 	return err
 }
 
+// SavePullRequestWithLabel saves or updates a pull request with its label in the database
+func (d *Database) SavePullRequestWithLabel(owner, repo string, pr *github.PullRequest, label string, debugMode bool) error {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, pr.GetNumber())
+
+	prWithLabel := PRWithLabel{
+		PR:    pr,
+		Label: label,
+	}
+
+	data, err := json.Marshal(prWithLabel)
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error marshaling PR with label %s: %v\n", key, err)
+		}
+		return fmt.Errorf("failed to marshal PR with label: %w", err)
+	}
+
+	err = d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pullRequestsBucket)
+		return b.Put([]byte(key), data)
+	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error saving PR with label %s: %v\n", key, err)
+		}
+	} else if debugMode {
+		fmt.Printf("  [DB] Saved PR %s with label %s\n", key, label)
+	}
+
+	return err
+}
+
 // GetPullRequest retrieves a pull request from the database
 func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullRequest, error) {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
@@ -99,6 +138,15 @@ func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullR
 		if data == nil {
 			return fmt.Errorf("PR not found")
 		}
+
+		// Try to unmarshal as PRWithLabel first (new format)
+		var prWithLabel PRWithLabel
+		if err := json.Unmarshal(data, &prWithLabel); err == nil && prWithLabel.PR != nil {
+			pr = *prWithLabel.PR
+			return nil
+		}
+
+		// Fall back to unmarshaling as just PullRequest (old format)
 		return json.Unmarshal(data, &pr)
 	})
 
@@ -106,6 +154,44 @@ func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullR
 		return nil, err
 	}
 	return &pr, nil
+}
+
+// GetPullRequestWithLabel retrieves a pull request with its label from the database
+func (d *Database) GetPullRequestWithLabel(owner, repo string, number int) (*github.PullRequest, string, error) {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+
+	var pr *github.PullRequest
+	var label string
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pullRequestsBucket)
+		data := b.Get([]byte(key))
+		if data == nil {
+			return fmt.Errorf("PR not found")
+		}
+
+		// Try to unmarshal as PRWithLabel first (new format)
+		var prWithLabel PRWithLabel
+		if err := json.Unmarshal(data, &prWithLabel); err == nil && prWithLabel.PR != nil {
+			pr = prWithLabel.PR
+			label = prWithLabel.Label
+			return nil
+		}
+
+		// Fall back to unmarshaling as just PullRequest (old format)
+		var oldPR github.PullRequest
+		if err := json.Unmarshal(data, &oldPR); err != nil {
+			return err
+		}
+		pr = &oldPR
+		label = "" // No label in old format
+		return nil
+	})
+
+	if err != nil {
+		return nil, "", err
+	}
+	return pr, label, nil
 }
 
 // SaveIssue saves or updates an issue in the database
@@ -242,6 +328,14 @@ func (d *Database) GetAllPullRequests(debugMode bool) (map[string]*github.PullRe
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(pullRequestsBucket)
 		return b.ForEach(func(k, v []byte) error {
+			// Try to unmarshal as PRWithLabel first (new format)
+			var prWithLabel PRWithLabel
+			if err := json.Unmarshal(v, &prWithLabel); err == nil && prWithLabel.PR != nil {
+				prs[string(k)] = prWithLabel.PR
+				return nil
+			}
+
+			// Fall back to unmarshaling as just PullRequest (old format)
 			var pr github.PullRequest
 			if err := json.Unmarshal(v, &pr); err != nil {
 				if debugMode {
@@ -266,6 +360,56 @@ func (d *Database) GetAllPullRequests(debugMode bool) (map[string]*github.PullRe
 	}
 
 	return prs, nil
+}
+
+// GetAllPullRequestsWithLabels retrieves all pull requests with their labels from the database
+func (d *Database) GetAllPullRequestsWithLabels(debugMode bool) (map[string]*github.PullRequest, map[string]string, error) {
+	prs := make(map[string]*github.PullRequest)
+	labels := make(map[string]string)
+
+	if debugMode {
+		fmt.Printf("  [DB] Reading all PRs with labels from database...\n")
+	}
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pullRequestsBucket)
+		return b.ForEach(func(k, v []byte) error {
+			key := string(k)
+
+			// Try to unmarshal as PRWithLabel first (new format)
+			var prWithLabel PRWithLabel
+			if err := json.Unmarshal(v, &prWithLabel); err == nil && prWithLabel.PR != nil {
+				prs[key] = prWithLabel.PR
+				labels[key] = prWithLabel.Label
+				return nil
+			}
+
+			// Fall back to unmarshaling as just PullRequest (old format)
+			var pr github.PullRequest
+			if err := json.Unmarshal(v, &pr); err != nil {
+				if debugMode {
+					fmt.Printf("  [DB] Error unmarshaling PR %s: %v\n", key, err)
+				}
+				return err
+			}
+			prs[key] = &pr
+			labels[key] = "" // No label in old format
+			return nil
+		})
+	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error reading PRs: %v\n", err)
+		}
+		return nil, nil, err
+	}
+
+	if debugMode {
+		fmt.Printf("  [DB] Loaded %d PRs from database\n", len(prs))
+	}
+
+	return prs, labels, nil
 }
 
 // GetAllIssues retrieves all issues from the database

@@ -1128,6 +1128,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 
 						// Check if PR has updates compared to cached version
 						hasUpdates := false
+						label := "Recent Activity"
 						if db != nil {
 							cachedPR, err := db.GetPullRequest(owner, repo, prNumber)
 							if err == nil {
@@ -1136,12 +1137,12 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 									hasUpdates = true
 								}
 							}
-							// Save PR to database
-							_ = db.SavePullRequest(owner, repo, pr, debugMode)
+							// Save PR to database with label
+							_ = db.SavePullRequestWithLabel(owner, repo, pr, label, debugMode)
 						}
 
 						activities = append(activities, PRActivity{
-							Label:      "Recent Activity",
+							Label:      label,
 							Owner:      owner,
 							Repo:       repo,
 							PR:         pr,
@@ -1178,7 +1179,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			return activities
 		}
 
-		allPRs, err := db.GetAllPullRequests(debugMode)
+		allPRs, prLabels, err := db.GetAllPullRequestsWithLabels(debugMode)
 		if err != nil {
 			if debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
@@ -1192,6 +1193,15 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 
 		totalFound := 0
 		for key, pr := range allPRs {
+			// Get the stored label for this PR
+			storedLabel := prLabels[key]
+
+			// Only include PRs that match the requested label
+			// If PR has no stored label (old format), skip it in local mode
+			if storedLabel != label {
+				continue
+			}
+
 			// Parse owner/repo from key format: "owner/repo#number"
 			parts := strings.Split(key, "/")
 			if len(parts) < 2 {
@@ -1221,7 +1231,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 
 			if !seen {
 				activities = append(activities, PRActivity{
-					Label:     label,
+					Label:     storedLabel,
 					Owner:     owner,
 					Repo:      repo,
 					PR:        pr,
@@ -1377,8 +1387,8 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 							}
 						}
 					}
-					// Save PR to database
-					_ = db.SavePullRequest(owner, repo, pr, debugMode)
+					// Save PR to database with label
+					_ = db.SavePullRequestWithLabel(owner, repo, pr, label, debugMode)
 				}
 
 				activities = append(activities, PRActivity{
