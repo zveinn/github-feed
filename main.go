@@ -1069,18 +1069,20 @@ func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 
 					label := "Recent Activity"
 
-					// Check if we've seen this PR before and if we should update its label
-					existingLabelInterface, seen := seenPRs.LoadOrStore(prKey, label)
-					shouldProcess := !seen
-					if seen {
-						existingLabel := existingLabelInterface.(string)
-						if shouldUpdateLabel(existingLabel, label, true) {
-							seenPRs.Store(prKey, label)
-							shouldProcess = true
+					// Check if we've already processed this PR in activitiesMap
+					existingActivity, alreadyProcessed := activitiesMap.Load(prKey)
+					shouldProcess := true
+
+					if alreadyProcessed {
+						// PR is already in activitiesMap, check if we need to update the label
+						existingPR := existingActivity.(*PRActivity)
+						if shouldUpdateLabel(existingPR.Label, label, true) {
+							// New label has higher priority, we'll update it
 							if config.debugMode {
-								fmt.Printf("  [Events] Updating label for %s from %s to %s (higher priority)\n", prKey, existingLabel, label)
+								fmt.Printf("  [Events] Updating label for %s from %s to %s (higher priority)\n", prKey, existingPR.Label, label)
 							}
 						} else {
+							// Existing label has higher or equal priority, skip
 							shouldProcess = false
 						}
 					}
@@ -1110,9 +1112,6 @@ func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 
 						hasUpdates := false
 
-						// The label has already been determined above, so we can use it
-						labelToUse := label
-
 						if config.db != nil {
 							cachedPR, err := config.db.GetPullRequest(owner, repo, prNumber)
 							if err == nil {
@@ -1120,11 +1119,11 @@ func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 									hasUpdates = true
 								}
 							}
-							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, labelToUse, config.debugMode)
+							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
 						}
 
 						activity := PRActivity{
-							Label:      labelToUse,
+							Label:      label,
 							Owner:      owner,
 							Repo:       repo,
 							PR:         pr,
@@ -1202,23 +1201,27 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 
 			prKey := key
 
-			// Check if we've seen this PR before and if we should update its label
-			existingLabelInterface, seen := seenPRs.LoadOrStore(prKey, label)
-			shouldProcess := !seen
-			if seen {
-				existingLabel := existingLabelInterface.(string)
-				if shouldUpdateLabel(existingLabel, label, true) {
-					seenPRs.Store(prKey, label)
-					shouldProcess = true
+			// Check if we've already processed this PR in activitiesMap
+			existingActivity, alreadyProcessed := activitiesMap.Load(prKey)
+			shouldProcess := true
+
+			if alreadyProcessed {
+				// PR is already in activitiesMap, check if we need to update the label
+				existingPR := existingActivity.(*PRActivity)
+				if shouldUpdateLabel(existingPR.Label, label, true) {
+					// New label has higher priority, we'll update it
 					if config.debugMode {
-						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingLabel, label)
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingPR.Label, label)
 					}
+				} else {
+					// Existing label has higher or equal priority, skip
+					shouldProcess = false
 				}
 			}
 
 			if shouldProcess {
 				activity := PRActivity{
-					Label:     storedLabel,
+					Label:     label,
 					Owner:     owner,
 					Repo:      repo,
 					PR:        pr,
@@ -1306,21 +1309,27 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 
 			prKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
-			// Check if we've seen this PR before and if we should update its label
-			existingLabelInterface, seen := seenPRs.LoadOrStore(prKey, label)
-			shouldProcess := !seen
-			if seen {
-				existingLabel := existingLabelInterface.(string)
-				if shouldUpdateLabel(existingLabel, label, true) {
-					seenPRs.Store(prKey, label)
-					shouldProcess = true
+			// Check if we've already processed this PR in activitiesMap
+			existingActivity, alreadyProcessed := activitiesMap.Load(prKey)
+			shouldProcess := true
+
+			if alreadyProcessed {
+				// PR is already in activitiesMap, check if we need to update the label
+				existingPR := existingActivity.(*PRActivity)
+				if shouldUpdateLabel(existingPR.Label, label, true) {
+					// New label has higher priority, we'll update it
 					if config.debugMode {
-						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingLabel, label)
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingPR.Label, label)
 					}
+				} else {
+					// Existing label has higher or equal priority, skip
+					shouldProcess = false
 				}
 			}
 
 			if shouldProcess {
+				// Store in seenPRs to prevent other goroutines from fetching the same PR
+				seenPRs.Store(prKey, label)
 				config.progress.addToTotal(1)
 				if !config.debugMode {
 					config.progress.display()
@@ -1354,21 +1363,6 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 
 				hasUpdates := false
 
-				// Determine the label to use (check if we should update based on priority)
-				labelToUse := label
-				existingLabelInterface, hasSeen := seenPRs.Load(prKey)
-				if hasSeen {
-					existingLabel := existingLabelInterface.(string)
-					if shouldUpdateLabel(existingLabel, label, true) {
-						labelToUse = label
-						if config.debugMode {
-							fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingLabel, label)
-						}
-					} else {
-						labelToUse = existingLabel
-					}
-				}
-
 				if config.db != nil {
 					cachedPR, err := config.db.GetPullRequest(owner, repo, *issue.Number)
 					if err == nil {
@@ -1382,11 +1376,11 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 							}
 						}
 					}
-					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, labelToUse, config.debugMode)
+					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
 				}
 
 				activity := PRActivity{
-					Label:      labelToUse,
+					Label:      label,
 					Owner:      owner,
 					Repo:       repo,
 					PR:         pr,
@@ -1530,23 +1524,27 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 
 			issueKey := key
 
-			// Check if we've seen this issue before and if we should update its label
-			existingLabelInterface, seen := seenIssues.LoadOrStore(issueKey, label)
-			shouldProcess := !seen
-			if seen {
-				existingLabel := existingLabelInterface.(string)
-				if shouldUpdateLabel(existingLabel, label, false) {
-					seenIssues.Store(issueKey, label)
-					shouldProcess = true
+			// Check if we've already processed this issue in issueActivitiesMap
+			existingActivity, alreadyProcessed := issueActivitiesMap.Load(issueKey)
+			shouldProcess := true
+
+			if alreadyProcessed {
+				// Issue is already in issueActivitiesMap, check if we need to update the label
+				existingIssue := existingActivity.(*IssueActivity)
+				if shouldUpdateLabel(existingIssue.Label, label, false) {
+					// New label has higher priority, we'll update it
 					if config.debugMode {
-						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, issueKey, existingLabel, label)
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, issueKey, existingIssue.Label, label)
 					}
+				} else {
+					// Existing label has higher or equal priority, skip
+					shouldProcess = false
 				}
 			}
 
 			if shouldProcess {
 				activity := IssueActivity{
-					Label:     storedLabel,
+					Label:     label,
 					Owner:     owner,
 					Repo:      repo,
 					Issue:     issue,
@@ -1634,34 +1632,26 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 
 			issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
-			// Check if we've seen this issue before and if we should update its label
-			existingLabelInterface, seen := seenIssues.LoadOrStore(issueKey, label)
-			shouldProcess := !seen
-			if seen {
-				existingLabel := existingLabelInterface.(string)
-				if shouldUpdateLabel(existingLabel, label, false) {
-					seenIssues.Store(issueKey, label)
-					shouldProcess = true
+			// Check if we've already processed this issue in issueActivitiesMap
+			existingActivity, alreadyProcessed := issueActivitiesMap.Load(issueKey)
+			shouldProcess := true
+
+			if alreadyProcessed {
+				// Issue is already in issueActivitiesMap, check if we need to update the label
+				existingIssue := existingActivity.(*IssueActivity)
+				if shouldUpdateLabel(existingIssue.Label, label, false) {
+					// New label has higher priority, we'll update it
 					if config.debugMode {
-						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, issueKey, existingLabel, label)
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, issueKey, existingIssue.Label, label)
 					}
+				} else {
+					// Existing label has higher or equal priority, skip
+					shouldProcess = false
 				}
 			}
 
 			if shouldProcess {
 				hasUpdates := false
-
-				// Determine the label to use (check if we should update based on priority)
-				labelToUse := label
-				existingLabelInterface, hasSeen := seenIssues.Load(issueKey)
-				if hasSeen {
-					existingLabel := existingLabelInterface.(string)
-					if shouldUpdateLabel(existingLabel, label, false) {
-						labelToUse = label
-					} else {
-						labelToUse = existingLabel
-					}
-				}
 
 				if config.db != nil {
 					cachedIssue, err := config.db.GetIssue(owner, repo, *issue.Number)
@@ -1670,11 +1660,11 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 							hasUpdates = true
 						}
 					}
-					_ = config.db.SaveIssueWithLabel(owner, repo, issue, labelToUse, config.debugMode)
+					_ = config.db.SaveIssueWithLabel(owner, repo, issue, label, config.debugMode)
 				}
 
 				activity := IssueActivity{
-					Label:      labelToUse,
+					Label:      label,
 					Owner:      owner,
 					Repo:       repo,
 					Issue:      issue,
