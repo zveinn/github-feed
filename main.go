@@ -58,6 +58,53 @@ type Config struct {
 
 var config Config
 
+func getPRLabelPriority(label string) int {
+	priorities := map[string]int{
+		"Authored":         1,
+		"Assigned":         2,
+		"Reviewed":         3,
+		"Review Requested": 4,
+		"Involved":         5,
+		"Commented":        6,
+		"Mentioned":        7,
+	}
+	if priority, ok := priorities[label]; ok {
+		return priority
+	}
+	return 999 // Unknown labels get lowest priority
+}
+
+func getIssueLabelPriority(label string) int {
+	priorities := map[string]int{
+		"Authored":  1,
+		"Assigned":  2,
+		"Involved":  3,
+		"Commented": 4,
+		"Mentioned": 5,
+	}
+	if priority, ok := priorities[label]; ok {
+		return priority
+	}
+	return 999 // Unknown labels get lowest priority
+}
+
+func shouldUpdateLabel(currentLabel, newLabel string, isPR bool) bool {
+	if currentLabel == "" {
+		return true
+	}
+
+	var currentPriority, newPriority int
+	if isPR {
+		currentPriority = getPRLabelPriority(currentLabel)
+		newPriority = getPRLabelPriority(newLabel)
+	} else {
+		currentPriority = getIssueLabelPriority(currentLabel)
+		newPriority = getIssueLabelPriority(newLabel)
+	}
+
+	return newPriority < currentPriority
+}
+
 func (p *Progress) increment() {
 	p.current.Add(1)
 }
@@ -568,8 +615,8 @@ func fetchAndDisplayActivity() {
 		}
 	}
 
-	var seenPRs sync.Map
-	activities := []PRActivity{}
+	var seenPRs sync.Map // Maps prKey -> label
+	activitiesMap := sync.Map{} // Maps prKey -> *PRActivity
 
 	initialTotal := 12
 	if !config.localMode {
@@ -595,7 +642,6 @@ func fetchAndDisplayActivity() {
 	}
 
 	var prWg sync.WaitGroup
-	var activitiesMu sync.Mutex
 
 	prQueries := []struct {
 		query string
@@ -614,26 +660,17 @@ func fetchAndDisplayActivity() {
 		query := pq.query
 		label := pq.label
 		prWg.Go(func() {
-			results := collectSearchResults(query, label, &seenPRs, []PRActivity{})
-			activitiesMu.Lock()
-			activities = append(activities, results...)
-			activitiesMu.Unlock()
+			collectSearchResults(query, label, &seenPRs, &activitiesMap)
 		})
 	}
 
 	if !config.localMode {
 		prWg.Go(func() {
-			results := collectActivityFromEvents(&seenPRs, []PRActivity{})
-			activitiesMu.Lock()
-			activities = append(activities, results...)
-			activitiesMu.Unlock()
+			collectActivityFromEvents(&seenPRs, &activitiesMap)
 		})
 	} else {
 		prWg.Go(func() {
-			results := collectSearchResults("", "Recent Activity", &seenPRs, []PRActivity{})
-			activitiesMu.Lock()
-			activities = append(activities, results...)
-			activitiesMu.Unlock()
+			collectSearchResults("", "Recent Activity", &seenPRs, &activitiesMap)
 		})
 	}
 
@@ -643,11 +680,10 @@ func fetchAndDisplayActivity() {
 		fmt.Println()
 		fmt.Println("Running issue search queries...")
 	}
-	var seenIssues sync.Map
-	issueActivities := []IssueActivity{}
+	var seenIssues sync.Map // Maps issueKey -> label
+	issueActivitiesMap := sync.Map{} // Maps issueKey -> *IssueActivity
 
 	var issueWg sync.WaitGroup
-	var issuesMu sync.Mutex
 
 	issueQueries := []struct {
 		query string
@@ -664,14 +700,29 @@ func fetchAndDisplayActivity() {
 		query := iq.query
 		label := iq.label
 		issueWg.Go(func() {
-			results := collectIssueSearchResults(query, label, &seenIssues, []IssueActivity{})
-			issuesMu.Lock()
-			issueActivities = append(issueActivities, results...)
-			issuesMu.Unlock()
+			collectIssueSearchResults(query, label, &seenIssues, &issueActivitiesMap)
 		})
 	}
 
 	issueWg.Wait()
+
+	// Convert activitiesMap to slice
+	activities := []PRActivity{}
+	activitiesMap.Range(func(key, value interface{}) bool {
+		if activity, ok := value.(*PRActivity); ok {
+			activities = append(activities, *activity)
+		}
+		return true
+	})
+
+	// Convert issueActivitiesMap to slice
+	issueActivities := []IssueActivity{}
+	issueActivitiesMap.Range(func(key, value interface{}) bool {
+		if activity, ok := value.(*IssueActivity); ok {
+			issueActivities = append(issueActivities, *activity)
+		}
+		return true
+	})
 
 	if config.debugMode {
 		fmt.Println("Checking cross-references between PRs and issues...")
@@ -940,7 +991,7 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(seenPRs *sync.Map, activities []PRActivity) []PRActivity {
+func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 	opts := &github.ListOptions{PerPage: 100}
 
 	if config.debugMode {
@@ -1016,9 +1067,25 @@ func collectActivityFromEvents(seenPRs *sync.Map, activities []PRActivity) []PRA
 				if prNumber > 0 {
 					prKey := fmt.Sprintf("%s/%s#%d", owner, repo, prNumber)
 
-					_, seen := seenPRs.LoadOrStore(prKey, true)
+					label := "Recent Activity"
 
-					if !seen {
+					// Check if we've seen this PR before and if we should update its label
+					existingLabelInterface, seen := seenPRs.LoadOrStore(prKey, label)
+					shouldProcess := !seen
+					if seen {
+						existingLabel := existingLabelInterface.(string)
+						if shouldUpdateLabel(existingLabel, label, true) {
+							seenPRs.Store(prKey, label)
+							shouldProcess = true
+							if config.debugMode {
+								fmt.Printf("  [Events] Updating label for %s from %s to %s (higher priority)\n", prKey, existingLabel, label)
+							}
+						} else {
+							shouldProcess = false
+						}
+					}
+
+					if shouldProcess {
 						config.progress.addToTotal(1)
 						if !config.debugMode {
 							config.progress.display()
@@ -1042,7 +1109,10 @@ func collectActivityFromEvents(seenPRs *sync.Map, activities []PRActivity) []PRA
 						}
 
 						hasUpdates := false
-						label := "Recent Activity"
+
+						// The label has already been determined above, so we can use it
+						labelToUse := label
+
 						if config.db != nil {
 							cachedPR, err := config.db.GetPullRequest(owner, repo, prNumber)
 							if err == nil {
@@ -1050,17 +1120,18 @@ func collectActivityFromEvents(seenPRs *sync.Map, activities []PRActivity) []PRA
 									hasUpdates = true
 								}
 							}
-							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
+							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, labelToUse, config.debugMode)
 						}
 
-						activities = append(activities, PRActivity{
-							Label:      label,
+						activity := PRActivity{
+							Label:      labelToUse,
 							Owner:      owner,
 							Repo:       repo,
 							PR:         pr,
 							UpdatedAt:  pr.GetUpdatedAt().Time,
 							HasUpdates: hasUpdates,
-						})
+						}
+						activitiesMap.Store(prKey, &activity)
 						totalPRs++
 					}
 				}
@@ -1080,14 +1151,12 @@ func collectActivityFromEvents(seenPRs *sync.Map, activities []PRActivity) []PRA
 			fmt.Println("  [Events] Complete: no new PRs found")
 		}
 	}
-
-	return activities
 }
 
-func collectSearchResults(query, label string, seenPRs *sync.Map, activities []PRActivity) []PRActivity {
+func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap *sync.Map) {
 	if config.localMode {
 		if config.db == nil {
-			return activities
+			return
 		}
 
 		allPRs, prLabels, err := config.db.GetAllPullRequestsWithLabels(config.debugMode)
@@ -1095,7 +1164,7 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 			if config.debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
 			}
-			return activities
+			return
 		}
 
 		if config.debugMode {
@@ -1133,16 +1202,29 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 
 			prKey := key
 
-			_, seen := seenPRs.LoadOrStore(prKey, true)
+			// Check if we've seen this PR before and if we should update its label
+			existingLabelInterface, seen := seenPRs.LoadOrStore(prKey, label)
+			shouldProcess := !seen
+			if seen {
+				existingLabel := existingLabelInterface.(string)
+				if shouldUpdateLabel(existingLabel, label, true) {
+					seenPRs.Store(prKey, label)
+					shouldProcess = true
+					if config.debugMode {
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingLabel, label)
+					}
+				}
+			}
 
-			if !seen {
-				activities = append(activities, PRActivity{
+			if shouldProcess {
+				activity := PRActivity{
 					Label:     storedLabel,
 					Owner:     owner,
 					Repo:      repo,
 					PR:        pr,
 					UpdatedAt: pr.GetUpdatedAt().Time,
-				})
+				}
+				activitiesMap.Store(prKey, &activity)
 				totalFound++
 			}
 		}
@@ -1151,7 +1233,7 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 			fmt.Printf("  [%s] Complete: %d PRs found\n", label, totalFound)
 		}
 
-		return activities
+		return
 	}
 
 	opts := &github.SearchOptions{
@@ -1196,7 +1278,7 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 			if resp != nil {
 				fmt.Printf("  [%s] Rate limit remaining: %d/%d\n", label, resp.Rate.Remaining, resp.Rate.Limit)
 			}
-			return activities
+			return
 		}
 
 		if config.debugMode && resp != nil {
@@ -1224,9 +1306,21 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 
 			prKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
-			_, seen := seenPRs.LoadOrStore(prKey, true)
+			// Check if we've seen this PR before and if we should update its label
+			existingLabelInterface, seen := seenPRs.LoadOrStore(prKey, label)
+			shouldProcess := !seen
+			if seen {
+				existingLabel := existingLabelInterface.(string)
+				if shouldUpdateLabel(existingLabel, label, true) {
+					seenPRs.Store(prKey, label)
+					shouldProcess = true
+					if config.debugMode {
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingLabel, label)
+					}
+				}
+			}
 
-			if !seen {
+			if shouldProcess {
 				config.progress.addToTotal(1)
 				if !config.debugMode {
 					config.progress.display()
@@ -1259,6 +1353,22 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 				}
 
 				hasUpdates := false
+
+				// Determine the label to use (check if we should update based on priority)
+				labelToUse := label
+				existingLabelInterface, hasSeen := seenPRs.Load(prKey)
+				if hasSeen {
+					existingLabel := existingLabelInterface.(string)
+					if shouldUpdateLabel(existingLabel, label, true) {
+						labelToUse = label
+						if config.debugMode {
+							fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingLabel, label)
+						}
+					} else {
+						labelToUse = existingLabel
+					}
+				}
+
 				if config.db != nil {
 					cachedPR, err := config.db.GetPullRequest(owner, repo, *issue.Number)
 					if err == nil {
@@ -1272,17 +1382,18 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 							}
 						}
 					}
-					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
+					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, labelToUse, config.debugMode)
 				}
 
-				activities = append(activities, PRActivity{
-					Label:      label,
+				activity := PRActivity{
+					Label:      labelToUse,
 					Owner:      owner,
 					Repo:       repo,
 					PR:         pr,
 					UpdatedAt:  pr.GetUpdatedAt().Time,
 					HasUpdates: hasUpdates,
-				})
+				}
+				activitiesMap.Store(prKey, &activity)
 				pageResults++
 				totalFound++
 			}
@@ -1302,8 +1413,6 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activities []P
 	if config.debugMode && totalFound > 0 {
 		fmt.Printf("  [%s] Complete: %d PRs found\n", label, totalFound)
 	}
-
-	return activities
 }
 
 func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool) {
@@ -1372,10 +1481,10 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 	}
 }
 
-func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueActivities []IssueActivity) []IssueActivity {
+func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueActivitiesMap *sync.Map) {
 	if config.localMode {
 		if config.db == nil {
-			return issueActivities
+			return
 		}
 
 		allIssues, issueLabels, err := config.db.GetAllIssuesWithLabels(config.debugMode)
@@ -1383,7 +1492,7 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 			if config.debugMode {
 				fmt.Printf("  [%s] Error loading from database: %v\n", label, err)
 			}
-			return issueActivities
+			return
 		}
 
 		if config.debugMode {
@@ -1421,16 +1530,29 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 
 			issueKey := key
 
-			_, seen := seenIssues.LoadOrStore(issueKey, true)
+			// Check if we've seen this issue before and if we should update its label
+			existingLabelInterface, seen := seenIssues.LoadOrStore(issueKey, label)
+			shouldProcess := !seen
+			if seen {
+				existingLabel := existingLabelInterface.(string)
+				if shouldUpdateLabel(existingLabel, label, false) {
+					seenIssues.Store(issueKey, label)
+					shouldProcess = true
+					if config.debugMode {
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, issueKey, existingLabel, label)
+					}
+				}
+			}
 
-			if !seen {
-				issueActivities = append(issueActivities, IssueActivity{
+			if shouldProcess {
+				activity := IssueActivity{
 					Label:     storedLabel,
 					Owner:     owner,
 					Repo:      repo,
 					Issue:     issue,
 					UpdatedAt: issue.GetUpdatedAt().Time,
-				})
+				}
+				issueActivitiesMap.Store(issueKey, &activity)
 				totalFound++
 			}
 		}
@@ -1439,7 +1561,7 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 			fmt.Printf("  [%s] Complete: %d issues found\n", label, totalFound)
 		}
 
-		return issueActivities
+		return
 	}
 
 	opts := &github.SearchOptions{
@@ -1484,7 +1606,7 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 			if resp != nil {
 				fmt.Printf("  [%s] Rate limit remaining: %d/%d\n", label, resp.Rate.Remaining, resp.Rate.Limit)
 			}
-			return issueActivities
+			return
 		}
 
 		if config.debugMode && resp != nil {
@@ -1512,10 +1634,35 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 
 			issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 
-			_, seen := seenIssues.LoadOrStore(issueKey, true)
+			// Check if we've seen this issue before and if we should update its label
+			existingLabelInterface, seen := seenIssues.LoadOrStore(issueKey, label)
+			shouldProcess := !seen
+			if seen {
+				existingLabel := existingLabelInterface.(string)
+				if shouldUpdateLabel(existingLabel, label, false) {
+					seenIssues.Store(issueKey, label)
+					shouldProcess = true
+					if config.debugMode {
+						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, issueKey, existingLabel, label)
+					}
+				}
+			}
 
-			if !seen {
+			if shouldProcess {
 				hasUpdates := false
+
+				// Determine the label to use (check if we should update based on priority)
+				labelToUse := label
+				existingLabelInterface, hasSeen := seenIssues.Load(issueKey)
+				if hasSeen {
+					existingLabel := existingLabelInterface.(string)
+					if shouldUpdateLabel(existingLabel, label, false) {
+						labelToUse = label
+					} else {
+						labelToUse = existingLabel
+					}
+				}
+
 				if config.db != nil {
 					cachedIssue, err := config.db.GetIssue(owner, repo, *issue.Number)
 					if err == nil {
@@ -1523,17 +1670,18 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 							hasUpdates = true
 						}
 					}
-					_ = config.db.SaveIssueWithLabel(owner, repo, issue, label, config.debugMode)
+					_ = config.db.SaveIssueWithLabel(owner, repo, issue, labelToUse, config.debugMode)
 				}
 
-				issueActivities = append(issueActivities, IssueActivity{
-					Label:      label,
+				activity := IssueActivity{
+					Label:      labelToUse,
 					Owner:      owner,
 					Repo:       repo,
 					Issue:      issue,
 					UpdatedAt:  issue.GetUpdatedAt().Time,
 					HasUpdates: hasUpdates,
-				})
+				}
+				issueActivitiesMap.Store(issueKey, &activity)
 				pageResults++
 				totalFound++
 			}
@@ -1553,6 +1701,4 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 	if config.debugMode && totalFound > 0 {
 		fmt.Printf("  [%s] Complete: %d issues found\n", label, totalFound)
 	}
-
-	return issueActivities
 }
