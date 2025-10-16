@@ -1082,8 +1082,12 @@ func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 								fmt.Printf("  [Events] Updating label for %s from %s to %s (higher priority)\n", prKey, existingPR.Label, label)
 							}
 						} else {
-							// Existing label has higher or equal priority, skip
-							shouldProcess = false
+							// Existing label has higher or equal priority, but we should still check for updates
+							// by fetching the PR if it's needed. For events, we always fetch fresh data anyway
+							// so we'll process it to check for updates but keep the existing label
+							if config.debugMode {
+								fmt.Printf("  [Events] Checking for updates on %s (keeping label %s)\n", prKey, existingPR.Label)
+							}
 						}
 					}
 
@@ -1117,13 +1121,35 @@ func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 							if err == nil {
 								if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
 									hasUpdates = true
+									if config.debugMode {
+										fmt.Printf("  [Events] Update detected: %s/%s#%d (API: %s > DB: %s)\n",
+											owner, repo, prNumber,
+											pr.GetUpdatedAt().Format("2006-01-02 15:04:05"),
+											cachedPR.GetUpdatedAt().Time.Format("2006-01-02 15:04:05"))
+									}
 								}
+							} else {
+								// If there's no cached version, this is a new PR, so it has "updates"
+								hasUpdates = true
 							}
-							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
+						}
+
+						// Determine the final label to use
+						finalLabel := label
+						if alreadyProcessed {
+							existingPR := existingActivity.(*PRActivity)
+							if !shouldUpdateLabel(existingPR.Label, label, true) {
+								// Keep the existing higher-priority label
+								finalLabel = existingPR.Label
+							}
+						}
+
+						if config.db != nil {
+							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, finalLabel, config.debugMode)
 						}
 
 						activity := PRActivity{
-							Label:      label,
+							Label:      finalLabel,
 							Owner:      owner,
 							Repo:       repo,
 							PR:         pr,
@@ -1322,7 +1348,7 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingPR.Label, label)
 					}
 				} else {
-					// Existing label has higher or equal priority, skip
+					// Existing label has higher or equal priority, skip fetching again
 					shouldProcess = false
 				}
 			}
@@ -1374,13 +1400,41 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 									pr.GetUpdatedAt().Format("2006-01-02 15:04:05"),
 									cachedPR.GetUpdatedAt().Time.Format("2006-01-02 15:04:05"))
 							}
+						} else if config.debugMode {
+							fmt.Printf("  [%s] No update: %s/%s#%d (API: %s == DB: %s)\n",
+								label, owner, repo, *issue.Number,
+								pr.GetUpdatedAt().Format("2006-01-02 15:04:05"),
+								cachedPR.GetUpdatedAt().Time.Format("2006-01-02 15:04:05"))
+						}
+					} else {
+						// If there's no cached version, this is a new PR, so it has "updates"
+						hasUpdates = true
+						if config.debugMode {
+							fmt.Printf("  [%s] New PR (not in DB): %s/%s#%d\n",
+								label, owner, repo, *issue.Number)
 						}
 					}
-					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
+				}
+
+				// Determine the final label to use
+				finalLabel := label
+				if alreadyProcessed {
+					existingPR := existingActivity.(*PRActivity)
+					if !shouldUpdateLabel(existingPR.Label, label, true) {
+						// Keep the existing higher-priority label
+						finalLabel = existingPR.Label
+						if config.debugMode {
+							fmt.Printf("  [%s] Keeping existing label %s for %s (higher priority)\n", label, finalLabel, prKey)
+						}
+					}
+				}
+
+				if config.db != nil {
+					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, finalLabel, config.debugMode)
 				}
 
 				activity := PRActivity{
-					Label:      label,
+					Label:      finalLabel,
 					Owner:      owner,
 					Repo:       repo,
 					PR:         pr,
