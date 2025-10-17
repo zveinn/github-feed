@@ -14,11 +14,61 @@ A fast, colorful CLI tool for monitoring GitHub pull requests and issues across 
 
 ## Installation
 
+### Pre-built Binaries (Recommended)
+
+Download the latest release for your platform from the [releases page](https://github.com/sveinn/github-feed/releases):
+
+**macOS**
+```bash
+# Intel Mac
+curl -L https://github.com/sveinn/github-feed/releases/latest/download/github-feed_<VERSION>_Darwin_x86_64.tar.gz | tar xz
+chmod +x github-feed
+sudo mv github-feed /usr/local/bin/
+
+# Apple Silicon Mac
+curl -L https://github.com/sveinn/github-feed/releases/latest/download/github-feed_<VERSION>_Darwin_arm64.tar.gz | tar xz
+chmod +x github-feed
+sudo mv github-feed /usr/local/bin/
+```
+
+**Linux**
+```bash
+# x86_64
+curl -L https://github.com/sveinn/github-feed/releases/latest/download/github-feed_<VERSION>_Linux_x86_64.tar.gz | tar xz
+chmod +x github-feed
+sudo mv github-feed /usr/local/bin/
+
+# ARM64
+curl -L https://github.com/sveinn/github-feed/releases/latest/download/github-feed_<VERSION>_Linux_arm64.tar.gz | tar xz
+chmod +x github-feed
+sudo mv github-feed /usr/local/bin/
+```
+
+**Windows**
+
+Download the appropriate `.zip` file from the releases page, extract it, and add `github-feed.exe` to your PATH.
+
 ### Build from Source
 
 ```bash
 go build -o github-feed .
 ```
+
+### Release Management
+
+Releases are automatically built and published via GitHub Actions using GoReleaser:
+
+```bash
+# Create a new release
+git tag -a v1.0.0 -m "Release v1.0.0"
+git push origin v1.0.0
+```
+
+This will automatically:
+- Build binaries for Linux (amd64, arm64), macOS (Intel, Apple Silicon), and Windows (amd64)
+- Generate checksums for all releases
+- Create a GitHub release with installation instructions
+- Publish all artifacts to the releases page
 
 ## Configuration
 
@@ -210,10 +260,30 @@ github-feed/
 ├── main.go                      # Main application code
 ├── db.go                        # Database operations for caching GitHub data
 ├── README.md                    # This file
+├── CLAUDE.md                    # Instructions for Claude Code AI assistant
+├── .goreleaser.yml              # GoReleaser configuration for builds
+├── .github/
+│   └── workflows/
+│       └── release.yml          # GitHub Actions workflow for releases
 
 ~/.github-feed/              # Config directory (auto-created)
  ├── .env                     # Configuration file with credentials
  └── github.db                # BBolt database for caching
+```
+
+### Testing Releases Locally
+
+You can test the GoReleaser build locally before pushing a tag:
+
+```bash
+# Install goreleaser
+go install github.com/goreleaser/goreleaser/v2@latest
+
+# Test the build (creates snapshot without publishing)
+goreleaser release --snapshot --clean
+
+# Check the dist/ folder for built binaries
+ls -la dist/
 ```
 
 ## License
