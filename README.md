@@ -151,6 +151,9 @@ github-feed --clean
 # Filter to specific repositories only
 github-feed --allowed-repos="user/repo1,user/repo2"
 
+# Quick offline mode with links (combines --local and --links)
+github-feed --ll
+
 # Combine flags
 github-feed --local --time 2w --debug --links --allowed-repos="miniohq/ec,tunnels-is/tunnels"
 ```
@@ -163,6 +166,7 @@ github-feed --local --time 2w --debug --links --allowed-repos="miniohq/ec,tunnel
 | `--debug` | Show detailed API call progress instead of progress bar |
 | `--local` | Use local database instead of GitHub API (offline mode, no token required) |
 | `--links` | Show hyperlinks (with 🔗 icon) underneath each PR and issue |
+| `--ll` | Shortcut for `--local --links` (offline mode with links) |
 | `--clean` | Delete and recreate the database cache (useful for starting fresh or fixing corrupted cache) |
 | `--allowed-repos REPOS` | Filter to specific repositories (comma-separated: `user/repo1,user/repo2`) |
 

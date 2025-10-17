@@ -24,6 +24,7 @@ go build -o github-feed main.go db.go
 ./github-feed --debug          # Show detailed API logging instead of progress bar
 ./github-feed --local          # Use local database instead of GitHub API (offline mode)
 ./github-feed --links          # Show hyperlinks underneath each PR/issue
+./github-feed --ll             # Shortcut for --local --links (offline mode with links)
 ./github-feed --clean          # Delete and recreate the database cache
 ./github-feed --allowed-repos="owner/repo1,owner/repo2"  # Filter to specific repos
 ```
@@ -216,6 +217,7 @@ Key functions:
 - `--debug`: Show detailed API logging instead of progress bar
 - `--local`: Use local database instead of GitHub API (offline mode, no token required)
 - `--links`: Show hyperlinks (🔗) underneath each PR/issue
+- `--ll`: Shortcut for `--local --links` (offline mode with links)
 - `--clean`: Delete and recreate the database cache (useful for starting fresh)
 - `--allowed-repos REPOS`: Filter to specific repositories (comma-separated: `owner/repo1,owner/repo2`)
 
