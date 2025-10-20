@@ -394,9 +394,6 @@ func main() {
 			localMode = true
 		} else if arg == "--links" {
 			showLinks = true
-		} else if arg == "--ll" {
-			localMode = true
-			showLinks = true
 		} else if arg == "--clean" {
 			cleanCache = true
 		} else if arg == "--allowed-repos" || strings.HasPrefix(arg, "--allowed-repos=") {
@@ -517,13 +514,12 @@ ALLOWED_REPOS=
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: github-feed [--time RANGE] [--debug] [--local] [--links] [--ll] [--clean] [--allowed-repos REPOS] [username]")
+		fmt.Println("Usage: github-feed [--time RANGE] [--debug] [--local] [--links] [--clean] [--allowed-repos REPOS] [username]")
 		fmt.Println("  --time RANGE: Show items from the last time range (default: 1m)")
 		fmt.Println("                Examples: 1h (1 hour), 2d (2 days), 3w (3 weeks), 4m (4 months), 1y (1 year)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
 		fmt.Println("  --links: Show hyperlinks underneath each PR/issue")
-		fmt.Println("  --ll: Shortcut for --local --links (offline mode with links)")
 		fmt.Println("  --clean: Delete and recreate the database cache")
 		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
@@ -549,7 +545,8 @@ ALLOWED_REPOS=
 	config.ctx = context.Background()
 	config.client = github.NewClient(nil).WithAuthToken(token)
 
-	fetchAndDisplayActivity()
+	// fetchAndDisplayActivityV2()
+	exampleSearchUsage()
 }
 
 func isRepoAllowed(owner, repo string) bool {
@@ -619,7 +616,7 @@ func fetchAndDisplayActivity() {
 		}
 	}
 
-	var seenPRs sync.Map // Maps prKey -> label
+	var seenPRs sync.Map        // Maps prKey -> label
 	activitiesMap := sync.Map{} // Maps prKey -> *PRActivity
 
 	initialTotal := 12
@@ -639,7 +636,6 @@ func fetchAndDisplayActivity() {
 
 	dateAgo := time.Now().Add(-config.timeRange).Format("2006-01-02")
 	dateFilter := fmt.Sprintf("updated:>=%s", dateAgo)
-
 
 	buildQuery := func(base string) string {
 		return fmt.Sprintf("%s %s", base, dateFilter)
@@ -684,7 +680,7 @@ func fetchAndDisplayActivity() {
 		fmt.Println()
 		fmt.Println("Running issue search queries...")
 	}
-	var seenIssues sync.Map // Maps issueKey -> label
+	var seenIssues sync.Map          // Maps issueKey -> label
 	issueActivitiesMap := sync.Map{} // Maps issueKey -> *IssueActivity
 
 	var issueWg sync.WaitGroup
@@ -731,7 +727,6 @@ func fetchAndDisplayActivity() {
 	if config.debugMode {
 		fmt.Println("Checking cross-references between PRs and issues...")
 	}
-
 
 	linkedIssues := make(map[string]bool)
 
@@ -1081,27 +1076,18 @@ func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 						// PR is already in activitiesMap, check if we need to update the label
 						existingPR := existingActivity.(*PRActivity)
 						if shouldUpdateLabel(existingPR.Label, label, true) {
-							// New label has higher priority, update the label but preserve HasUpdates
+							// New label has higher priority, we'll update it
 							if config.debugMode {
 								fmt.Printf("  [Events] Updating label for %s from %s to %s (higher priority)\n", prKey, existingPR.Label, label)
 							}
-							// Create updated activity with new label but preserve HasUpdates
-							updatedActivity := *existingPR
-							updatedActivity.Label = label
-							activitiesMap.Store(prKey, &updatedActivity)
-
-							// Also update in database with new label
-							if config.db != nil {
-								_ = config.db.SavePullRequestWithLabel(owner, repo, existingPR.PR, label, config.debugMode)
-							}
 						} else {
-							// Existing label has higher or equal priority, keep existing activity
+							// Existing label has higher or equal priority, but we should still check for updates
+							// by fetching the PR if it's needed. For events, we always fetch fresh data anyway
+							// so we'll process it to check for updates but keep the existing label
 							if config.debugMode {
-								fmt.Printf("  [Events] Skipping %s (keeping label %s with existing HasUpdates)\n", prKey, existingPR.Label)
+								fmt.Printf("  [Events] Checking for updates on %s (keeping label %s)\n", prKey, existingPR.Label)
 							}
 						}
-						// Skip fetching since we already have this PR
-						shouldProcess = false
 					}
 
 					if shouldProcess {
@@ -1147,12 +1133,22 @@ func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
 							}
 						}
 
+						// Determine the final label to use
+						finalLabel := label
+						if alreadyProcessed {
+							existingPR := existingActivity.(*PRActivity)
+							if !shouldUpdateLabel(existingPR.Label, label, true) {
+								// Keep the existing higher-priority label
+								finalLabel = existingPR.Label
+							}
+						}
+
 						if config.db != nil {
-							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
+							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, finalLabel, config.debugMode)
 						}
 
 						activity := PRActivity{
-							Label:      label,
+							Label:      finalLabel,
 							Owner:      owner,
 							Repo:       repo,
 							PR:         pr,
@@ -1238,17 +1234,14 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 				// PR is already in activitiesMap, check if we need to update the label
 				existingPR := existingActivity.(*PRActivity)
 				if shouldUpdateLabel(existingPR.Label, label, true) {
-					// New label has higher priority, update the label but preserve HasUpdates
+					// New label has higher priority, we'll update it
 					if config.debugMode {
 						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingPR.Label, label)
 					}
-					// Create updated activity with new label but preserve HasUpdates
-					updatedActivity := *existingPR
-					updatedActivity.Label = label
-					activitiesMap.Store(prKey, &updatedActivity)
+				} else {
+					// Existing label has higher or equal priority, skip
+					shouldProcess = false
 				}
-				// Skip since we already have this PR
-				shouldProcess = false
 			}
 
 			if shouldProcess {
@@ -1349,22 +1342,14 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 				// PR is already in activitiesMap, check if we need to update the label
 				existingPR := existingActivity.(*PRActivity)
 				if shouldUpdateLabel(existingPR.Label, label, true) {
-					// New label has higher priority, update the label but preserve HasUpdates
+					// New label has higher priority, we'll update it
 					if config.debugMode {
 						fmt.Printf("  [%s] Updating label for %s from %s to %s (higher priority)\n", label, prKey, existingPR.Label, label)
 					}
-					// Create updated activity with new label but preserve HasUpdates
-					updatedActivity := *existingPR
-					updatedActivity.Label = label
-					activitiesMap.Store(prKey, &updatedActivity)
-
-					// Also update in database with new label
-					if config.db != nil {
-						_ = config.db.SavePullRequestWithLabel(owner, repo, existingPR.PR, label, config.debugMode)
-					}
+				} else {
+					// Existing label has higher or equal priority, skip fetching again
+					shouldProcess = false
 				}
-				// Skip fetching since we already have this PR
-				shouldProcess = false
 			}
 
 			if shouldProcess {
@@ -1430,12 +1415,25 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 					}
 				}
 
+				// Determine the final label to use
+				finalLabel := label
+				if alreadyProcessed {
+					existingPR := existingActivity.(*PRActivity)
+					if !shouldUpdateLabel(existingPR.Label, label, true) {
+						// Keep the existing higher-priority label
+						finalLabel = existingPR.Label
+						if config.debugMode {
+							fmt.Printf("  [%s] Keeping existing label %s for %s (higher priority)\n", label, finalLabel, prKey)
+						}
+					}
+				}
+
 				if config.db != nil {
-					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, label, config.debugMode)
+					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, finalLabel, config.debugMode)
 				}
 
 				activity := PRActivity{
-					Label:      label,
+					Label:      finalLabel,
 					Owner:      owner,
 					Repo:       repo,
 					PR:         pr,

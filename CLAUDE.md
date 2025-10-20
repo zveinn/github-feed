@@ -10,7 +10,7 @@ GitHub Feed is a Go CLI tool for monitoring GitHub pull requests and issues acro
 
 ```bash
 # Build the binary
-go build -o github-feed main.go db.go
+go build -o github-feed .
 
 # Run directly (fetches from GitHub API)
 ./github-feed
@@ -62,7 +62,12 @@ Database location: `~/.github-feed/github.db` (automatically created on first ru
 
 ### Core Data Structures
 
-**PRActivity**: Represents a PR with metadata:
+**Config**: Global configuration structure (main.go:46-57):
+- Consolidates all application settings (debug mode, local mode, time range, etc.)
+- Shared across the application via global `config` variable
+- Includes client, database, progress, and context references
+
+**PRActivity**: Represents a PR with metadata (main.go:22-30):
 - Label: How the user is involved (e.g., "Authored", "Reviewed")
 - Owner/Repo: Repository identification
 - PR: GitHub PullRequest object
@@ -70,33 +75,49 @@ Database location: `~/.github-feed/github.db` (automatically created on first ru
 - HasUpdates: True if API version is newer than cached version
 - Issues: Linked issues that reference this PR
 
-**IssueActivity**: Represents an issue with similar metadata structure
+**IssueActivity**: Represents an issue with similar metadata structure (main.go:32-39)
 
-**Progress**: Thread-safe progress tracking with colored bar display:
+**Progress**: Thread-safe progress tracking with colored bar display (main.go:41-44):
+- Uses `atomic.Int32` for both `current` and `total` fields (no mutexes needed)
 - Dynamically adjusts total as pagination and additional API calls are discovered
 - Updates in real-time across all goroutines
 - Provides visual feedback with color-coded completion status (red/yellow/green)
-- Uses mutex for thread-safe counter operations
+- Supports warning messages during retries via `displayWithWarning()` method
 
-**Database**: BBolt wrapper providing structured storage:
+**Database**: BBolt wrapper providing structured storage (db.go:20-22):
 - PRWithLabel and IssueWithLabel: Wraps items with their activity labels
 - Supports both old format (without labels) and new format (with labels) for backwards compatibility
 
 ### Key Functions
 
-**fetchAndDisplayActivity**: Main orchestration function that:
+**getPRLabelPriority / getIssueLabelPriority**: Label priority functions (main.go:61-89):
+- Define priority ordering for PR labels: Authored(1) > Assigned(2) > Reviewed(3) > Review Requested(4) > Involved(5) > Commented(6) > Mentioned(7)
+- Define priority ordering for issue labels: Authored(1) > Assigned(2) > Involved(3) > Commented(4) > Mentioned(5)
+- Unknown labels get priority 999 (lowest)
+- Used by `shouldUpdateLabel()` to determine if a label should be replaced
+
+**shouldUpdateLabel**: Determines if a label should be updated (main.go:91-106):
+- Takes current label, new label, and isPR flag
+- Returns true if new label has higher priority (lower number)
+- Empty current labels always get updated
+- Ensures PRs/issues always show their most important involvement type
+- Tested in priority_test.go
+
+**fetchAndDisplayActivity**: Main orchestration function (main.go:609-886):
 - Checks GitHub API rate limits before starting
 - Launches parallel PR/issue searches with dynamic progress tracking
 - Performs cross-reference detection to link issues with PRs
 - Sorts and displays results by state (open/merged/closed)
-- Accepts `showLinks` parameter to optionally display URLs
+- Uses global `config` for all settings
 - Handles both online (API) and offline (database) modes
 
-**retryWithBackoff**: Wraps API calls with infinite retry logic:
+**retryWithBackoff**: Wraps API calls with infinite retry logic (main.go:163-249):
 - Exponential backoff starting at 1s, max 30s
-- Special handling for rate limit errors (longer backoff)
-- Shows countdown timer in progress bar during waits
+- Special handling for rate limit errors (longer backoff with factor 2.0)
+- General errors use shorter backoff (factor 1.5)
+- Shows countdown timer in progress bar during waits via `displayWithWarning()`
 - Works seamlessly with both debug and normal modes
+- Uses global `config.ctx` for cancellation support
 
 **areCrossReferenced**: Determines if a PR and issue reference each other by:
 - Checking PR/issue body text for mentions first (fast path)
@@ -105,53 +126,92 @@ Database location: `~/.github-feed/github.db` (automatically created on first ru
 - Returns early if mention found in bodies to avoid API call
 - Adds API call to progress total dynamically only when needed
 
-**collectSearchResults**: Handles PR search with pagination:
+**collectSearchResults**: Handles PR search with pagination (main.go:1184-1465):
 - Supports both API mode (GitHub search) and local mode (database)
 - Paginates through GitHub search results in API mode
 - Dynamically adds additional pages to progress total when discovered
-- Deduplicates using seenPRs map with mutex protection
+- Uses `sync.Map` for thread-safe deduplication (seenPRs and activitiesMap)
+- Implements label priority system: only updates PR if new label has higher priority
 - Fetches PR details for each result and adds to progress total
 - Detects updates by comparing API timestamps with cached versions
 - Caches all data to database with labels for offline mode
+- Filters by allowed repos if configured
 
-**collectIssueSearchResults**: Handles issue search (similar to collectSearchResults):
+**collectIssueSearchResults**: Handles issue search (main.go:1533-1749):
 - Same pattern as PR collection but for issues
 - Filters out items with PullRequestLinks (actual PRs, not issues)
+- Uses `sync.Map` for thread-safe deduplication
+- Implements label priority system for issues
 - Stores issues with their activity labels
+- Detects updates by comparing API timestamps with cached versions
 
-**collectActivityFromEvents**: Fetches recent PR activity from Events API:
+**collectActivityFromEvents**: Fetches recent PR activity from Events API (main.go:998-1182):
 - Processes up to 3 pages of user events (300 events)
-- Filters for PR-related event types
+- Filters for PR-related event types (PullRequestEvent, PullRequestReviewEvent, etc.)
 - Extracts PR numbers from event payloads
-- Deduplicates and fetches PR details
+- Uses `sync.Map` for deduplication
+- Implements label priority system: only updates if "Recent Activity" has higher priority
 - Labels found PRs as "Recent Activity"
+- Only runs in online mode (not local mode)
 
-**displayPR**: Renders a PR with color-coded information:
+**displayPR**: Renders a PR with color-coded information (main.go:1467-1493):
 - Formatted date, label, username, repo, and title
-- Update indicator (● icon) if item has updates since last cache
+- Update indicator (yellow ● icon) if item has updates since last cache
 - Optional hyperlink with 🔗 icon (when `--links` flag is used)
+- Uses global `config.showLinks` setting
 
-**displayIssue**: Renders an issue (similar to displayPR):
-- Similar formatting with proper indentation for nested issues
-- State indicator when displayed under a PR
+**displayIssue**: Renders an issue (main.go:1495-1531):
+- Similar formatting to displayPR with proper indentation for nested issues
+- State indicator (OPEN/CLOSED) when displayed under a PR
+- Update indicator (yellow ● icon) if item has updates since last cache
 - Optional hyperlink with proper indentation
+- Uses global `config.showLinks` setting
 
 **Color System**: Consistent color coding throughout:
-- getUserColor(): FNV hash-based consistent colors per username
-- getLabelColor(): Fixed colors for involvement types
-- getStateColor(): Fixed colors for PR/issue states (open/closed/merged)
+- `getUserColor()` (main.go:269-289): FNV hash-based consistent colors per username (11 color options)
+- `getLabelColor()` (main.go:251-267): Fixed colors for involvement types (Authored=cyan, Mentioned=yellow, etc.)
+- `getStateColor()` (main.go:291-302): Fixed colors for PR/issue states (open=green, closed=red, merged=magenta)
+
+**Helper Functions**:
+- `loadEnvFile()` (main.go:304-327): Parses `.env` file and loads environment variables
+- `parseTimeRange()` (main.go:329-359): Converts time range strings (e.g., "1h", "2d") to `time.Duration`
+- `isRepoAllowed()` (main.go:555-561): Checks if a repository is in the allowed repos list
+- `checkRateLimit()` (main.go:563-607): Checks GitHub API rate limits before making requests
+- `mentionsNumber()` (main.go:959-996): Detects if text mentions a specific PR/issue number (supports multiple patterns)
+
+### Label Priority System
+
+When a PR or issue appears in multiple search results (e.g., you both authored and reviewed a PR), the tool uses a priority system to determine which label to display:
+
+**PR Label Priorities** (from highest to lowest):
+1. Authored - You created the PR
+2. Assigned - You're assigned to the PR
+3. Reviewed - You reviewed the PR
+4. Review Requested - Your review was requested
+5. Involved - You're involved in some way
+6. Commented - You commented on the PR
+7. Mentioned - You were mentioned in the PR
+
+**Issue Label Priorities** (from highest to lowest):
+1. Authored - You created the issue
+2. Assigned - You're assigned to the issue
+3. Involved - You're involved in some way
+4. Commented - You commented on the issue
+5. Mentioned - You were mentioned in the issue
+
+The system ensures that each PR/issue is displayed with its most important involvement type. When processing search results, labels are only updated if the new label has higher priority than the existing one. This prevents less important labels from overwriting more important ones.
 
 ### Concurrency Patterns
 
 The codebase uses `sync.WaitGroup` with goroutines (via `.Go()` method) for parallel API calls:
-- **PR Collection**: 7 parallel search queries + 1 event polling goroutine
+- **PR Collection**: 7 parallel search queries + 1 event polling goroutine (or 8 queries in local mode)
 - **Issue Collection**: 5 parallel search queries
 - **Cross-Reference Detection**: Parallel checking of PR-issue relationships
 
-All concurrent access to shared data is protected:
-- `seenPRs` and `seenIssues` maps use dedicated mutexes (`seenPRsMu`, `seenIssuesMu`)
-- `activities` and `issueActivities` slices use dedicated mutexes (`activitiesMu`, `issuesMu`)
-- `Progress` struct uses internal mutex for counter operations
+All concurrent access to shared data is protected using modern Go patterns:
+- **sync.Map**: `seenPRs`, `seenIssues`, `activitiesMap`, and `issueActivitiesMap` use `sync.Map` for lock-free concurrent access
+- **atomic operations**: `Progress` struct uses `atomic.Int32` for `current` and `total` fields (no mutexes needed)
+- **Conversion to slices**: After all goroutines complete, `sync.Map` data is converted to regular slices for sorting/display
 
 Progress tracking is thread-safe and updated after each API call across all goroutines. The progress bar dynamically adjusts its total as new work is discovered during execution.
 
@@ -227,25 +287,43 @@ When modifying this codebase:
 - **Mode Testing**: Test with both `--debug` and default modes (progress bar vs. detailed logs)
 - **Offline Mode**: Test `--local` mode to ensure database reads work correctly
 - **Link Display**: Test `--links` flag to verify URLs are displayed correctly with proper indentation
-- **Concurrency Safety**: Verify mutex/atomic protection on any new shared data structures
+- **Concurrency Safety**: Verify atomic operations and `sync.Map` usage on any new shared data structures
+- **Label Priority**: Test label updates to ensure priority system works correctly (see priority_test.go)
 - **Cross-Reference Patterns**: Test with various mention patterns: `#123`, `fixes #123`, `closes #123`, GitHub URLs
 - **Rate Limits**: Consider GitHub API rate limits when adding new API calls (5000/hr core, 30/min search)
 - **Progress Tracking**: When adding new API calls, ensure progress bar is updated:
-  - Add to total before making the call: `progress.addToTotal(1)`
-  - Increment after call completes: `progress.increment()`
-  - Display after each update: `progress.display()` (unless debug mode)
+  - Add to total before making the call: `config.progress.addToTotal(1)`
+  - Increment after call completes: `config.progress.increment()`
+  - Display after each update: `config.progress.display()` (unless debug mode)
 - **Error Handling**: Wrap all API calls with `retryWithBackoff()` for resilience
 - **Database Errors**: Currently some database write errors are silently ignored with `_` - consider adding error logging
 - **First Run**: Verify `~/.github-feed/` directory is created on first run with proper permissions (0755 for dir, 0600 for .env, 0666 for db)
 - **Backwards Compatibility**: When changing database format, ensure old format can still be read
+- **Global Config**: Use global `config` variable instead of passing parameters individually
+
+## Testing
+
+The project includes unit tests for critical functionality:
+
+**priority_test.go**: Tests for label priority system
+- `TestPRLabelPriority`: Validates PR label priority ordering
+- `TestIssueLabelPriority`: Validates issue label priority ordering
+- `TestShouldUpdateLabel_PR`: Tests PR label update logic with various priority combinations
+- `TestShouldUpdateLabel_Issue`: Tests issue label update logic with various priority combinations
+
+Run tests with:
+```bash
+go test -v
+go test -v -run TestPRLabelPriority  # Run specific test
+```
 
 ## Refactoring Opportunities
 
 Based on code analysis, potential improvements include:
-1. **Atomic Operations**: Replace Progress mutex with atomic int32/int64 operations
-2. **sync.Map**: Replace seenPRs/seenIssues mutexes with sync.Map for better concurrency
+1. ✅ **COMPLETED: Atomic Operations** - Progress now uses `atomic.Int32` instead of mutexes
+2. ✅ **COMPLETED: sync.Map** - All shared maps now use `sync.Map` for lock-free concurrency
 3. **Channels**: Replace WaitGroups with result channels for cleaner coordination
 4. **Code Reuse**: Extract common patterns between collectSearchResults and collectIssueSearchResults
 5. **Display Logic**: Unify displayPR and displayIssue with generic display function
-6. **Progress Bar**: Extract duplicated progress bar building logic into single function
+6. ✅ **COMPLETED: Progress Bar Logic** - `buildBar()` method extracts progress bar building logic (main.go:116-138)
 7. **Database Operations**: Extract common patterns in GetAll* functions
