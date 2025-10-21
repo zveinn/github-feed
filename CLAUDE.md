@@ -90,9 +90,9 @@ Database location: `~/.github-feed/github.db` (automatically created on first ru
 
 ### Key Functions
 
-**getPRLabelPriority / getIssueLabelPriority**: Label priority functions (main.go:61-89):
-- Define priority ordering for PR labels: Authored(1) > Assigned(2) > Reviewed(3) > Review Requested(4) > Involved(5) > Commented(6) > Mentioned(7)
-- Define priority ordering for issue labels: Authored(1) > Assigned(2) > Involved(3) > Commented(4) > Mentioned(5)
+**getPRLabelPriority / getIssueLabelPriority**: Label priority functions (main.go:61-87):
+- Define priority ordering for PR labels: Authored(1) > Assigned(2) > Reviewed(3) > Review Requested(4) > Commented(5) > Mentioned(6)
+- Define priority ordering for issue labels: Authored(1) > Assigned(2) > Commented(3) > Mentioned(4)
 - Unknown labels get priority 999 (lowest)
 - Used by `shouldUpdateLabel()` to determine if a label should be replaced
 
@@ -188,16 +188,14 @@ When a PR or issue appears in multiple search results (e.g., you both authored a
 2. Assigned - You're assigned to the PR
 3. Reviewed - You reviewed the PR
 4. Review Requested - Your review was requested
-5. Involved - You're involved in some way
-6. Commented - You commented on the PR
-7. Mentioned - You were mentioned in the PR
+5. Commented - You commented on the PR
+6. Mentioned - You were mentioned in the PR
 
 **Issue Label Priorities** (from highest to lowest):
 1. Authored - You created the issue
 2. Assigned - You're assigned to the issue
-3. Involved - You're involved in some way
-4. Commented - You commented on the issue
-5. Mentioned - You were mentioned in the issue
+3. Commented - You commented on the issue
+4. Mentioned - You were mentioned in the issue
 
 The system ensures that each PR/issue is displayed with its most important involvement type. When processing search results, labels are only updated if the new label has higher priority than the existing one. This prevents less important labels from overwriting more important ones.
 

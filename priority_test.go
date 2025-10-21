@@ -13,9 +13,8 @@ func TestPRLabelPriority(t *testing.T) {
 		{"Assigned", 2},
 		{"Reviewed", 3},
 		{"Review Requested", 4},
-		{"Involved", 5},
-		{"Commented", 6},
-		{"Mentioned", 7},
+		{"Commented", 5},
+		{"Mentioned", 6},
 		{"Unknown", 999},
 	}
 
@@ -36,9 +35,8 @@ func TestIssueLabelPriority(t *testing.T) {
 	}{
 		{"Authored", 1},
 		{"Assigned", 2},
-		{"Involved", 3},
-		{"Commented", 4},
-		{"Mentioned", 5},
+		{"Commented", 3},
+		{"Mentioned", 4},
 		{"Unknown", 999},
 	}
 
@@ -90,8 +88,8 @@ func TestShouldUpdateLabel_Issue(t *testing.T) {
 		{"higher priority should update", "Mentioned", "Authored", true},
 		{"same priority should not update", "Authored", "Authored", false},
 		{"lower priority should not update", "Authored", "Mentioned", false},
-		{"from Mentioned to Involved", "Mentioned", "Involved", true},
-		{"from Authored to Involved", "Authored", "Involved", false},
+		{"from Mentioned to Commented", "Mentioned", "Commented", true},
+		{"from Authored to Commented", "Authored", "Commented", false},
 		{"from Commented to Assigned", "Commented", "Assigned", true},
 	}
 

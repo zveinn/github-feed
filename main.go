@@ -64,9 +64,8 @@ func getPRLabelPriority(label string) int {
 		"Assigned":         2,
 		"Reviewed":         3,
 		"Review Requested": 4,
-		"Involved":         5,
-		"Commented":        6,
-		"Mentioned":        7,
+		"Commented":        5,
+		"Mentioned":        6,
 	}
 	if priority, ok := priorities[label]; ok {
 		return priority
@@ -78,9 +77,8 @@ func getIssueLabelPriority(label string) int {
 	priorities := map[string]int{
 		"Authored":  1,
 		"Assigned":  2,
-		"Involved":  3,
-		"Commented": 4,
-		"Mentioned": 5,
+		"Commented": 3,
+		"Mentioned": 4,
 	}
 	if priority, ok := priorities[label]; ok {
 		return priority
@@ -545,8 +543,7 @@ ALLOWED_REPOS=
 	config.ctx = context.Background()
 	config.client = github.NewClient(nil).WithAuthToken(token)
 
-	// fetchAndDisplayActivityV2()
-	exampleSearchUsage()
+	fetchAndDisplayActivity()
 }
 
 func isRepoAllowed(owner, repo string) bool {
@@ -619,9 +616,10 @@ func fetchAndDisplayActivity() {
 	var seenPRs sync.Map        // Maps prKey -> label
 	activitiesMap := sync.Map{} // Maps prKey -> *PRActivity
 
-	initialTotal := 12
+	// 6 PR queries + 4 issue queries = 10 total
+	initialTotal := 10
 	if !config.localMode {
-		initialTotal += 3
+		initialTotal += 3 // Add 3 for event pages
 	}
 	config.progress = &Progress{}
 	config.progress.current.Store(0)
@@ -651,7 +649,6 @@ func fetchAndDisplayActivity() {
 		{buildQuery(fmt.Sprintf("is:pr review-requested:%s", config.username)), "Review Requested"},
 		{buildQuery(fmt.Sprintf("is:pr author:%s", config.username)), "Authored"},
 		{buildQuery(fmt.Sprintf("is:pr assignee:%s", config.username)), "Assigned"},
-		{buildQuery(fmt.Sprintf("is:pr involves:%s", config.username)), "Involved"},
 		{buildQuery(fmt.Sprintf("is:pr commenter:%s", config.username)), "Commented"},
 		{buildQuery(fmt.Sprintf("is:pr mentions:%s", config.username)), "Mentioned"},
 	}
@@ -664,15 +661,15 @@ func fetchAndDisplayActivity() {
 		})
 	}
 
-	if !config.localMode {
-		prWg.Go(func() {
-			collectActivityFromEvents(&seenPRs, &activitiesMap)
-		})
-	} else {
-		prWg.Go(func() {
-			collectSearchResults("", "Recent Activity", &seenPRs, &activitiesMap)
-		})
-	}
+	// if !config.localMode {
+	// 	prWg.Go(func() {
+	// 		collectActivityFromEvents(&seenPRs, &activitiesMap)
+	// 	})
+	// } else {
+	// 	prWg.Go(func() {
+	// 		collectSearchResults("", "Recent Activity", &seenPRs, &activitiesMap)
+	// 	})
+	// }
 
 	prWg.Wait()
 
@@ -693,7 +690,6 @@ func fetchAndDisplayActivity() {
 		{buildQuery(fmt.Sprintf("is:issue mentions:%s", config.username)), "Mentioned"},
 		{buildQuery(fmt.Sprintf("is:issue assignee:%s", config.username)), "Assigned"},
 		{buildQuery(fmt.Sprintf("is:issue commenter:%s", config.username)), "Commented"},
-		{buildQuery(fmt.Sprintf("is:issue involves:%s", config.username)), "Involved"},
 	}
 
 	for _, iq := range issueQueries {
@@ -1231,7 +1227,6 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 			shouldProcess := true
 
 			if alreadyProcessed {
-				// PR is already in activitiesMap, check if we need to update the label
 				existingPR := existingActivity.(*PRActivity)
 				if shouldUpdateLabel(existingPR.Label, label, true) {
 					// New label has higher priority, we'll update it
@@ -1361,30 +1356,22 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 				}
 
 				var pr *github.PullRequest
-				var prErr error
-
-				retryErr := retryWithBackoff(func() error {
-					pr, _, prErr = config.client.PullRequests.Get(config.ctx, owner, repo, *issue.Number)
-					return prErr
-				}, fmt.Sprintf("%s-PR#%d", label, *issue.Number))
+				// var prErr error
 
 				config.progress.increment()
 				if !config.debugMode {
 					config.progress.display()
 				}
 
-				if retryErr != nil {
-					fmt.Printf("  [%s] Warning: Could not fetch details for %s/%s#%d: %v\n", label, owner, repo, *issue.Number, retryErr)
-
-					pr = &github.PullRequest{
-						Number:    issue.Number,
-						Title:     issue.Title,
-						State:     issue.State,
-						UpdatedAt: issue.UpdatedAt,
-						User:      issue.User,
-						HTMLURL:   issue.HTMLURL,
-					}
+				pr = &github.PullRequest{
+					Number:    issue.Number,
+					Title:     issue.Title,
+					State:     issue.State,
+					UpdatedAt: issue.UpdatedAt,
+					User:      issue.User,
+					HTMLURL:   issue.HTMLURL,
 				}
+				// }
 
 				hasUpdates := false
 
