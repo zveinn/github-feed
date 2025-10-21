@@ -1205,6 +1205,7 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 				pr = &github.PullRequest{
 					Number:    issue.Number,
 					Title:     issue.Title,
+					Body:      issue.Body,
 					State:     issue.State,
 					UpdatedAt: issue.UpdatedAt,
 					User:      issue.User,
