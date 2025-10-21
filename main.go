@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -358,59 +359,51 @@ func parseTimeRange(timeStr string) (time.Duration, error) {
 }
 
 func main() {
-	var username string
-	var timeRange time.Duration = 30 * 24 * time.Hour
+	// Define flags
+	var timeRangeStr string
 	var debugMode bool
 	var localMode bool
 	var showLinks bool
+	var llMode bool
 	var allowedReposFlag string
 	var cleanCache bool
 
-	for i := 1; i < len(os.Args); i++ {
-		arg := os.Args[i]
-		if arg == "--time" || strings.HasPrefix(arg, "--time=") {
-			var timeStr string
-			if strings.HasPrefix(arg, "--time=") {
-				timeStr = strings.TrimPrefix(arg, "--time=")
-			} else if i+1 < len(os.Args) {
-				timeStr = os.Args[i+1]
-				i++ // Skip next argument
-			} else {
-				fmt.Println("Error: --time requires a value (e.g., --time 1h, --time 2d, --time 3w, --time 4m, --time 1y)")
-				os.Exit(1)
-			}
+	flag.StringVar(&timeRangeStr, "time", "1m", "Show items from last time range (1h, 2d, 3w, 4m, 1y)")
+	flag.BoolVar(&debugMode, "debug", false, "Show detailed API logging")
+	flag.BoolVar(&localMode, "local", false, "Use local database instead of GitHub API")
+	flag.BoolVar(&showLinks, "links", false, "Show hyperlinks underneath each PR/issue")
+	flag.BoolVar(&llMode, "ll", false, "Shortcut for --local --links (offline mode with links)")
+	flag.BoolVar(&cleanCache, "clean", false, "Delete and recreate the database cache")
+	flag.StringVar(&allowedReposFlag, "allowed-repos", "", "Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 
-			duration, err := parseTimeRange(timeStr)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				fmt.Println("Examples: --time 1h (1 hour), --time 2d (2 days), --time 3w (3 weeks), --time 4m (4 months), --time 1y (1 year)")
-				os.Exit(1)
-			}
-			timeRange = duration
-		} else if arg == "--debug" {
-			debugMode = true
-		} else if arg == "--local" {
-			localMode = true
-		} else if arg == "--links" {
-			showLinks = true
-		} else if arg == "--ll" {
-			localMode = true
-			showLinks = true
-		} else if arg == "--clean" {
-			cleanCache = true
-		} else if arg == "--allowed-repos" || strings.HasPrefix(arg, "--allowed-repos=") {
-			if strings.HasPrefix(arg, "--allowed-repos=") {
-				allowedReposFlag = strings.TrimPrefix(arg, "--allowed-repos=")
-			} else if i+1 < len(os.Args) {
-				allowedReposFlag = os.Args[i+1]
-				i++
-			} else {
-				fmt.Println("Error: --allowed-repos requires a comma-separated list of repos")
-				os.Exit(1)
-			}
-		} else if !strings.HasPrefix(arg, "--") {
-			username = arg
-		}
+	// Custom usage message
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "GitHub Feed - Monitor GitHub pull requests and issues across repositories")
+		fmt.Fprintln(os.Stderr, "\nOptions:")
+		flag.PrintDefaults()
+		fmt.Fprintln(os.Stderr, "\nEnvironment Variables:")
+		fmt.Fprintln(os.Stderr, "  GITHUB_TOKEN or GITHUB_ACTIVITY_TOKEN - GitHub Personal Access Token")
+		fmt.Fprintln(os.Stderr, "  GITHUB_USERNAME or GITHUB_USER         - Your GitHub username")
+		fmt.Fprintln(os.Stderr, "  ALLOWED_REPOS                          - Comma-separated list of allowed repos")
+		fmt.Fprintln(os.Stderr, "\nConfiguration File:")
+		fmt.Fprintln(os.Stderr, "  ~/.github-feed/.env                    - Configuration file (auto-created)")
+	}
+
+	flag.Parse()
+
+	// Handle --ll shortcut
+	if llMode {
+		localMode = true
+		showLinks = true
+	}
+
+	// Parse time range
+	timeRange, err := parseTimeRange(timeRangeStr)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		fmt.Println("Examples: --time 1h (1 hour), --time 2d (2 days), --time 3w (3 weeks), --time 4m (4 months), --time 1y (1 year)")
+		os.Exit(1)
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -449,7 +442,7 @@ ALLOWED_REPOS=
 
 	_ = loadEnvFile(envPath)
 
-	username = os.Getenv("GITHUB_USERNAME")
+	username := os.Getenv("GITHUB_USERNAME")
 	if username == "" {
 		username = os.Getenv("GITHUB_USER")
 	}
@@ -502,31 +495,10 @@ ALLOWED_REPOS=
 	if token == "" {
 		token = os.Getenv("GITHUB_TOKEN")
 	}
-	if token == "" && !localMode {
-		fmt.Println("Error: GITHUB_ACTIVITY_TOKEN or GITHUB_TOKEN environment variable is required")
-		fmt.Println("\nTo generate a GitHub token:")
-		fmt.Println("1. Go to https://github.com/settings/tokens")
-		fmt.Println("2. Click 'Generate new token' -> 'Generate new token (classic)'")
-		fmt.Println("3. Give it a name and select these scopes: 'repo', 'read:org'")
-		fmt.Println("4. Generate and copy the token")
-		fmt.Println("5. Export it: export GITHUB_TOKEN=your_token_here")
-		fmt.Printf("6. Or add it to %s\n", envPath)
-		os.Exit(1)
-	}
 
-	if username == "" && !localMode {
-		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: github-feed [--time RANGE] [--debug] [--local] [--links] [--ll] [--clean] [--allowed-repos REPOS] [username]")
-		fmt.Println("  --time RANGE: Show items from the last time range (default: 1m)")
-		fmt.Println("                Examples: 1h (1 hour), 2d (2 days), 3w (3 weeks), 4m (4 months), 1y (1 year)")
-		fmt.Println("  --debug: Show detailed API progress")
-		fmt.Println("  --local: Use local database instead of GitHub API")
-		fmt.Println("  --links: Show hyperlinks underneath each PR/issue")
-		fmt.Println("  --ll: Shortcut for --local --links (offline mode with links)")
-		fmt.Println("  --clean: Delete and recreate the database cache")
-		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
-		fmt.Println("Or set GITHUB_USERNAME environment variable")
-		fmt.Printf("Or add it to %s\n", envPath)
+	// Validate configuration
+	if err := validateConfig(username, token, localMode, envPath); err != nil {
+		fmt.Printf("Configuration Error: %v\n\n", err)
 		os.Exit(1)
 	}
 
@@ -549,6 +521,29 @@ ALLOWED_REPOS=
 	config.client = github.NewClient(nil).WithAuthToken(token)
 
 	fetchAndDisplayActivity()
+}
+
+func validateConfig(username, token string, localMode bool, envPath string) error {
+	if localMode {
+		return nil // No validation needed for offline mode
+	}
+
+	if username == "" {
+		return fmt.Errorf("GitHub username is required.\n\nTo fix this:\n  - Set GITHUB_USERNAME environment variable\n  - Or add it to %s", envPath)
+	}
+
+	if token == "" {
+		return fmt.Errorf("GitHub token is required.\n\nTo fix this:\n  1. Generate a token at https://github.com/settings/tokens\n  2. Click 'Generate new token' -> 'Generate new token (classic)'\n  3. Give it a name and select scopes: 'repo', 'read:org'\n  4. Generate and copy the token\n  5. Set GITHUB_TOKEN environment variable\n  6. Or add it to %s", envPath)
+	}
+
+	// Validate token format (GitHub PAT tokens start with ghp_, gho_, or github_pat_)
+	if !strings.HasPrefix(token, "ghp_") &&
+		!strings.HasPrefix(token, "gho_") &&
+		!strings.HasPrefix(token, "github_pat_") {
+		return fmt.Errorf("GitHub token format looks invalid.\n\nGitHub Personal Access Tokens should start with:\n  - 'ghp_' (classic PAT)\n  - 'gho_' (OAuth token)\n  - 'github_pat_' (fine-grained PAT)\n\nYour token starts with: '%s'\n\nPlease check your token at https://github.com/settings/tokens", token[:min(10, len(token))])
+	}
+
+	return nil
 }
 
 func isRepoAllowed(owner, repo string) bool {
@@ -721,7 +716,30 @@ func fetchAndDisplayActivity() {
 
 	linkedIssues := make(map[string]bool)
 
+	// Channel-based approach to avoid race conditions
+	type crossRefResult struct {
+		prIndex   int
+		issue     IssueActivity
+		issueKey  string
+		debugInfo string
+	}
+	resultsChan := make(chan crossRefResult, 100)
+
 	var wg sync.WaitGroup
+
+	// Launch collector goroutine to handle all appends and map writes
+	collectorDone := make(chan struct{})
+	go func() {
+		for result := range resultsChan {
+			// Safe to modify since only this goroutine accesses these
+			activities[result.prIndex].Issues = append(activities[result.prIndex].Issues, result.issue)
+			linkedIssues[result.issueKey] = true
+			if config.debugMode {
+				fmt.Println(result.debugInfo)
+			}
+		}
+		close(collectorDone)
+	}()
 
 	for j := range issueActivities {
 		issue := &issueActivities[j]
@@ -730,14 +748,24 @@ func fetchAndDisplayActivity() {
 		for i := range activities {
 			pr := &activities[i]
 			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
+				// Capture loop variables
+				prIndex := i
+				issueCopy := *issue
+				issueKeyCopy := issueKey
+				prCopy := pr
 				wg.Go(func() {
-					if areCrossReferenced(pr, issue) {
-						pr.Issues = append(pr.Issues, *issue)
-						linkedIssues[issueKey] = true
+					if areCrossReferenced(prCopy, &issueCopy) {
+						debugInfo := ""
 						if config.debugMode {
-							fmt.Printf("  Linked %s/%s#%d <-> %s/%s#%d\n",
-								pr.Owner, pr.Repo, pr.PR.GetNumber(),
-								issue.Owner, issue.Repo, issue.Issue.GetNumber())
+							debugInfo = fmt.Sprintf("  Linked %s/%s#%d <-> %s/%s#%d",
+								prCopy.Owner, prCopy.Repo, prCopy.PR.GetNumber(),
+								issueCopy.Owner, issueCopy.Repo, issueCopy.Issue.GetNumber())
+						}
+						resultsChan <- crossRefResult{
+							prIndex:   prIndex,
+							issue:     issueCopy,
+							issueKey:  issueKeyCopy,
+							debugInfo: debugInfo,
 						}
 					}
 				})
@@ -746,6 +774,8 @@ func fetchAndDisplayActivity() {
 	}
 
 	wg.Wait()
+	close(resultsChan)
+	<-collectorDone
 
 	standaloneIssues := []IssueActivity{}
 	for _, issue := range issueActivities {
