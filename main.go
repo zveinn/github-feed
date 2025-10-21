@@ -743,7 +743,7 @@ func fetchAndDisplayActivity() {
 
 	for j := range issueActivities {
 		issue := &issueActivities[j]
-		issueKey := fmt.Sprintf("%s/%s#%d", issue.Owner, issue.Repo, issue.Issue.GetNumber())
+		issueKey := buildItemKey(issue.Owner, issue.Repo, issue.Issue.GetNumber())
 
 		for i := range activities {
 			pr := &activities[i]
@@ -779,7 +779,7 @@ func fetchAndDisplayActivity() {
 
 	standaloneIssues := []IssueActivity{}
 	for _, issue := range issueActivities {
-		issueKey := fmt.Sprintf("%s/%s#%d", issue.Owner, issue.Repo, issue.Issue.GetNumber())
+		issueKey := buildItemKey(issue.Owner, issue.Repo, issue.Issue.GetNumber())
 		if !linkedIssues[issueKey] {
 			standaloneIssues = append(standaloneIssues, issue)
 		}
@@ -1166,7 +1166,7 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 				continue
 			}
 
-			prKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
+			prKey := buildItemKey(owner, repo, *issue.Number)
 
 			// Check if we've already processed this PR in activitiesMap
 			existingActivity, alreadyProcessed := activitiesMap.Load(prKey)
@@ -1293,54 +1293,42 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 	}
 }
 
-func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool) {
-	dateStr := "          "
-	if pr.UpdatedAt != nil {
-		dateStr = pr.UpdatedAt.Format("2006/01/02")
-	}
-
-	labelColor := getLabelColor(label)
-	userColor := getUserColor(pr.User.GetLogin())
-
-	updateIcon := ""
-	if hasUpdates {
-		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
-	}
-
-	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
-		updateIcon,
-		dateStr,
-		labelColor.Sprint(strings.ToUpper(label)),
-		userColor.Sprint(pr.User.GetLogin()),
-		owner, repo, *pr.Number,
-		*pr.Title,
-	)
-
-	if config.showLinks && pr.HTMLURL != nil {
-		fmt.Printf("   🔗 %s\n", *pr.HTMLURL)
-	}
+// DisplayConfig holds all the information needed to display a PR or issue
+type DisplayConfig struct {
+	Owner      string
+	Repo       string
+	Number     int
+	Title      string
+	User       string
+	UpdatedAt  *github.Timestamp
+	HTMLURL    *string
+	Label      string
+	HasUpdates bool
+	IsIndented bool   // for nested display under PRs
+	State      *string // for issues nested under PRs (OPEN/CLOSED)
 }
 
-func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool) {
+// displayItem is the unified display function for both PRs and issues
+func displayItem(cfg DisplayConfig) {
 	dateStr := "          "
-	if issue.UpdatedAt != nil {
-		dateStr = issue.UpdatedAt.Format("2006/01/02")
+	if cfg.UpdatedAt != nil {
+		dateStr = cfg.UpdatedAt.Format("2006/01/02")
 	}
 
 	indent := ""
 	linkIndent := "   "
-	if indented {
-		state := strings.ToUpper(*issue.State)
-		stateColor := getStateColor(*issue.State)
+	if cfg.IsIndented && cfg.State != nil {
+		state := strings.ToUpper(*cfg.State)
+		stateColor := getStateColor(*cfg.State)
 		indent = fmt.Sprintf("-- %s ", stateColor.Sprint(state))
 		linkIndent = "      "
 	}
 
-	labelColor := getLabelColor(label)
-	userColor := getUserColor(issue.User.GetLogin())
+	labelColor := getLabelColor(cfg.Label)
+	userColor := getUserColor(cfg.User)
 
 	updateIcon := ""
-	if hasUpdates {
+	if cfg.HasUpdates {
 		updateIcon = color.New(color.FgYellow, color.Bold).Sprint("● ")
 	}
 
@@ -1348,15 +1336,46 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool,
 		updateIcon,
 		indent,
 		dateStr,
-		labelColor.Sprint(strings.ToUpper(label)),
-		userColor.Sprint(issue.User.GetLogin()),
-		owner, repo, *issue.Number,
-		*issue.Title,
+		labelColor.Sprint(strings.ToUpper(cfg.Label)),
+		userColor.Sprint(cfg.User),
+		cfg.Owner, cfg.Repo, cfg.Number,
+		cfg.Title,
 	)
 
-	if config.showLinks && issue.HTMLURL != nil {
-		fmt.Printf("%s🔗 %s\n", linkIndent, *issue.HTMLURL)
+	if config.showLinks && cfg.HTMLURL != nil {
+		fmt.Printf("%s🔗 %s\n", linkIndent, *cfg.HTMLURL)
 	}
+}
+
+func displayPR(label, owner, repo string, pr *github.PullRequest, hasUpdates bool) {
+	displayItem(DisplayConfig{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     pr.GetNumber(),
+		Title:      pr.GetTitle(),
+		User:       pr.User.GetLogin(),
+		UpdatedAt:  pr.UpdatedAt,
+		HTMLURL:    pr.HTMLURL,
+		Label:      label,
+		HasUpdates: hasUpdates,
+		IsIndented: false,
+	})
+}
+
+func displayIssue(label, owner, repo string, issue *github.Issue, indented bool, hasUpdates bool) {
+	displayItem(DisplayConfig{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     issue.GetNumber(),
+		Title:      issue.GetTitle(),
+		User:       issue.User.GetLogin(),
+		UpdatedAt:  issue.UpdatedAt,
+		HTMLURL:    issue.HTMLURL,
+		Label:      label,
+		HasUpdates: hasUpdates,
+		IsIndented: indented,
+		State:      issue.State,
+	})
 }
 
 func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueActivitiesMap *sync.Map) {
@@ -1514,7 +1533,7 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 				continue
 			}
 
-			issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
+			issueKey := buildItemKey(owner, repo, *issue.Number)
 
 			// Check if we've already processed this issue in issueActivitiesMap
 			existingActivity, alreadyProcessed := issueActivitiesMap.Load(issueKey)

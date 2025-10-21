@@ -21,6 +21,42 @@ type Database struct {
 	db *bolt.DB
 }
 
+// buildItemKey creates a consistent key format for PRs and issues
+func buildItemKey(owner, repo string, number int) string {
+	return fmt.Sprintf("%s/%s#%d", owner, repo, number)
+}
+
+// buildCommentKey creates a consistent key format for comments
+func buildCommentKey(owner, repo string, itemNumber int, commentType string, commentID int64) string {
+	return fmt.Sprintf("%s/%s#%d/%s/%d", owner, repo, itemNumber, commentType, commentID)
+}
+
+// save is a generic function to save data to a bucket with consistent error handling and logging
+func (d *Database) save(bucket []byte, key string, data interface{}, debugMode bool, itemType string) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error marshaling %s %s: %v\n", itemType, key, err)
+		}
+		return fmt.Errorf("failed to marshal %s: %w", itemType, err)
+	}
+
+	err = d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		return b.Put([]byte(key), jsonData)
+	})
+
+	if err != nil {
+		if debugMode {
+			fmt.Printf("  [DB] Error saving %s %s: %v\n", itemType, key, err)
+		}
+	} else if debugMode {
+		fmt.Printf("  [DB] Saved %s %s\n", itemType, key)
+	}
+
+	return err
+}
+
 func OpenDatabase(path string) (*Database, error) {
 	db, err := bolt.Open(path, 0666, &bolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
@@ -61,66 +97,21 @@ type PRWithLabel struct {
 }
 
 func (d *Database) SavePullRequest(owner, repo string, pr *github.PullRequest, debugMode bool) error {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, pr.GetNumber())
-
-	data, err := json.Marshal(pr)
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error marshaling PR %s: %v\n", key, err)
-		}
-		return fmt.Errorf("failed to marshal PR: %w", err)
-	}
-
-	err = d.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(pullRequestsBucket)
-		return b.Put([]byte(key), data)
-	})
-
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error saving PR %s: %v\n", key, err)
-		}
-	} else if debugMode {
-		fmt.Printf("  [DB] Saved PR %s\n", key)
-	}
-
-	return err
+	key := buildItemKey(owner, repo, pr.GetNumber())
+	return d.save(pullRequestsBucket, key, pr, debugMode, "PR")
 }
 
 func (d *Database) SavePullRequestWithLabel(owner, repo string, pr *github.PullRequest, label string, debugMode bool) error {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, pr.GetNumber())
-
+	key := buildItemKey(owner, repo, pr.GetNumber())
 	prWithLabel := PRWithLabel{
 		PR:    pr,
 		Label: label,
 	}
-
-	data, err := json.Marshal(prWithLabel)
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error marshaling PR with label %s: %v\n", key, err)
-		}
-		return fmt.Errorf("failed to marshal PR with label: %w", err)
-	}
-
-	err = d.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(pullRequestsBucket)
-		return b.Put([]byte(key), data)
-	})
-
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error saving PR with label %s: %v\n", key, err)
-		}
-	} else if debugMode {
-		fmt.Printf("  [DB] Saved PR %s with label %s\n", key, label)
-	}
-
-	return err
+	return d.save(pullRequestsBucket, key, prWithLabel, debugMode, fmt.Sprintf("PR with label %s", label))
 }
 
 func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullRequest, error) {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	key := buildItemKey(owner, repo, number)
 
 	var pr github.PullRequest
 	err := d.db.View(func(tx *bolt.Tx) error {
@@ -146,7 +137,7 @@ func (d *Database) GetPullRequest(owner, repo string, number int) (*github.PullR
 }
 
 func (d *Database) GetPullRequestWithLabel(owner, repo string, number int) (*github.PullRequest, string, error) {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	key := buildItemKey(owner, repo, number)
 
 	var pr *github.PullRequest
 	var label string
@@ -186,66 +177,21 @@ type IssueWithLabel struct {
 }
 
 func (d *Database) SaveIssue(owner, repo string, issue *github.Issue, debugMode bool) error {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, issue.GetNumber())
-
-	data, err := json.Marshal(issue)
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error marshaling issue %s: %v\n", key, err)
-		}
-		return fmt.Errorf("failed to marshal issue: %w", err)
-	}
-
-	err = d.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(issuesBucket)
-		return b.Put([]byte(key), data)
-	})
-
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error saving issue %s: %v\n", key, err)
-		}
-	} else if debugMode {
-		fmt.Printf("  [DB] Saved issue %s\n", key)
-	}
-
-	return err
+	key := buildItemKey(owner, repo, issue.GetNumber())
+	return d.save(issuesBucket, key, issue, debugMode, "issue")
 }
 
 func (d *Database) SaveIssueWithLabel(owner, repo string, issue *github.Issue, label string, debugMode bool) error {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, issue.GetNumber())
-
+	key := buildItemKey(owner, repo, issue.GetNumber())
 	issueWithLabel := IssueWithLabel{
 		Issue: issue,
 		Label: label,
 	}
-
-	data, err := json.Marshal(issueWithLabel)
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error marshaling issue with label %s: %v\n", key, err)
-		}
-		return fmt.Errorf("failed to marshal issue with label: %w", err)
-	}
-
-	err = d.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(issuesBucket)
-		return b.Put([]byte(key), data)
-	})
-
-	if err != nil {
-		if debugMode {
-			fmt.Printf("  [DB] Error saving issue with label %s: %v\n", key, err)
-		}
-	} else if debugMode {
-		fmt.Printf("  [DB] Saved issue %s with label %s\n", key, label)
-	}
-
-	return err
+	return d.save(issuesBucket, key, issueWithLabel, debugMode, fmt.Sprintf("issue with label %s", label))
 }
 
 func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, error) {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	key := buildItemKey(owner, repo, number)
 
 	var issue github.Issue
 	err := d.db.View(func(tx *bolt.Tx) error {
@@ -271,7 +217,7 @@ func (d *Database) GetIssue(owner, repo string, number int) (*github.Issue, erro
 }
 
 func (d *Database) GetIssueWithLabel(owner, repo string, number int) (*github.Issue, string, error) {
-	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	key := buildItemKey(owner, repo, number)
 
 	var issue *github.Issue
 	var label string
@@ -306,7 +252,7 @@ func (d *Database) GetIssueWithLabel(owner, repo string, number int) (*github.Is
 }
 
 func (d *Database) SaveComment(owner, repo string, itemNumber int, comment *github.IssueComment, commentType string) error {
-	key := fmt.Sprintf("%s/%s#%d/%s/%d", owner, repo, itemNumber, commentType, comment.GetID())
+	key := buildCommentKey(owner, repo, itemNumber, commentType, comment.GetID())
 
 	data, err := json.Marshal(comment)
 	if err != nil {
@@ -347,7 +293,7 @@ func (d *Database) SavePRComment(owner, repo string, prNumber int, comment *gith
 }
 
 func (d *Database) GetComment(owner, repo string, itemNumber int, commentType string, commentID int64) (*github.IssueComment, error) {
-	key := fmt.Sprintf("%s/%s#%d/%s/%d", owner, repo, itemNumber, commentType, commentID)
+	key := buildCommentKey(owner, repo, itemNumber, commentType, commentID)
 
 	var comment github.IssueComment
 	err := d.db.View(func(tx *bolt.Tx) error {
