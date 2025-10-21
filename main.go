@@ -661,16 +661,6 @@ func fetchAndDisplayActivity() {
 		})
 	}
 
-	// if !config.localMode {
-	// 	prWg.Go(func() {
-	// 		collectActivityFromEvents(&seenPRs, &activitiesMap)
-	// 	})
-	// } else {
-	// 	prWg.Go(func() {
-	// 		collectSearchResults("", "Recent Activity", &seenPRs, &activitiesMap)
-	// 	})
-	// }
-
 	prWg.Wait()
 
 	if config.debugMode {
@@ -825,25 +815,10 @@ func fetchAndDisplayActivity() {
 		}
 	}
 
-	if len(mergedPRs) > 0 {
-		fmt.Println()
-		titleColor := color.New(color.FgHiMagenta, color.Bold)
-		fmt.Println(titleColor.Sprint("MERGED PULL REQUESTS:"))
-		fmt.Println("------------------------------------------")
-		for _, activity := range mergedPRs {
-			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
-			if len(activity.Issues) > 0 {
-				for _, issue := range activity.Issues {
-					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true, issue.HasUpdates)
-				}
-			}
-		}
-	}
-
 	if len(closedPRs) > 0 {
 		fmt.Println()
 		titleColor := color.New(color.FgHiRed, color.Bold)
-		fmt.Println(titleColor.Sprint("CLOSED PULL REQUESTS:"))
+		fmt.Println(titleColor.Sprint("CLOSED/MERGED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range closedPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR, activity.HasUpdates)
