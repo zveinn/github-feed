@@ -160,12 +160,11 @@ Database location: `~/.github-feed/github.db` (automatically created on first ru
 - Detects updates by comparing API timestamps with cached versions
 - In local mode: filters by storedLabel and timeRange
 
-**collectActivityFromEvents**: NOT CURRENTLY CALLED in the codebase (main.go:964-1149):
-- This function exists but is not invoked by fetchAndDisplayActivity
-- Was likely removed from the workflow but code remains
-- If it were called, it would: process up to 3 pages of user events (300 events), filter for PR-related event types, label found PRs as "Recent Activity"
+**collectActivityFromEvents**: ~~NOT CURRENTLY CALLED in the codebase~~ ✅ **REMOVED** - Dead code removed (was 186 lines)
+- This function existed but was never invoked by fetchAndDisplayActivity
+- Removed to reduce code complexity and maintainability burden
 
-**displayPR**: Renders a PR with color-coded information (main.go:1427-1453):
+**displayPR**: Renders a PR with color-coded information (main.go:1241-1267):
 - Formatted date, label, username, repo, and title
 - Update indicator (yellow ● icon) if item has updates since last cache
 - Optional hyperlink with 🔗 icon (when `--links` flag is used)
@@ -356,11 +355,11 @@ go test -v -run TestPRLabelPriority  # Run specific test
 
 ## Known Issues & Discrepancies
 
-1. **`--ll` flag**: Documented in README but NOT implemented in code. Users must use `--local --links` separately.
-2. **collectActivityFromEvents**: Function exists but is never called - events API integration was likely removed but code remains
+1. ~~**`--ll` flag**: Documented in README but NOT implemented in code~~ ✅ **FIXED** - Flag now properly implemented (lines 395-397)
+2. ~~**collectActivityFromEvents**: Function exists but is never called~~ ✅ **FIXED** - Dead code removed (186 lines)
 3. **Initial progress total**: README mentions "7 PR queries" but actual code uses 6 PR queries
 4. **PR detail fetching**: Code no longer fetches individual PR details via PullRequests.Get() - uses search result data directly
-5. **Database write errors**: Some database Save operations ignore errors with `_` assignment
+5. ~~**Database write errors**: Some database Save operations ignore errors~~ ✅ **FIXED** - Error logging added with atomic counter and summary warnings
 
 ## Refactoring Opportunities
 

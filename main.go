@@ -44,16 +44,17 @@ type Progress struct {
 }
 
 type Config struct {
-	debugMode    bool
-	localMode    bool
-	showLinks    bool
-	timeRange    time.Duration
-	username     string
-	allowedRepos map[string]bool
-	client       *github.Client
-	db           *Database
-	progress     *Progress
-	ctx          context.Context
+	debugMode     bool
+	localMode     bool
+	showLinks     bool
+	timeRange     time.Duration
+	username      string
+	allowedRepos  map[string]bool
+	client        *github.Client
+	db            *Database
+	progress      *Progress
+	ctx           context.Context
+	dbErrorCount  atomic.Int32
 }
 
 var config Config
@@ -392,6 +393,9 @@ func main() {
 			localMode = true
 		} else if arg == "--links" {
 			showLinks = true
+		} else if arg == "--ll" {
+			localMode = true
+			showLinks = true
 		} else if arg == "--clean" {
 			cleanCache = true
 		} else if arg == "--allowed-repos" || strings.HasPrefix(arg, "--allowed-repos=") {
@@ -512,12 +516,13 @@ ALLOWED_REPOS=
 
 	if username == "" && !localMode {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: github-feed [--time RANGE] [--debug] [--local] [--links] [--clean] [--allowed-repos REPOS] [username]")
+		fmt.Println("Usage: github-feed [--time RANGE] [--debug] [--local] [--links] [--ll] [--clean] [--allowed-repos REPOS] [username]")
 		fmt.Println("  --time RANGE: Show items from the last time range (default: 1m)")
 		fmt.Println("                Examples: 1h (1 hour), 2d (2 days), 3w (3 weeks), 4m (4 months), 1y (1 year)")
 		fmt.Println("  --debug: Show detailed API progress")
 		fmt.Println("  --local: Use local database instead of GitHub API")
 		fmt.Println("  --links: Show hyperlinks underneath each PR/issue")
+		fmt.Println("  --ll: Shortcut for --local --links (offline mode with links)")
 		fmt.Println("  --clean: Delete and recreate the database cache")
 		fmt.Println("  --allowed-repos REPOS: Comma-separated list of allowed repos (e.g., user/repo1,user/repo2)")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
@@ -849,6 +854,17 @@ func fetchAndDisplayActivity() {
 			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false, issue.HasUpdates)
 		}
 	}
+
+	// Warn about database errors if any occurred
+	if dbErrors := config.dbErrorCount.Load(); dbErrors > 0 {
+		fmt.Printf("\n")
+		warningColor := color.New(color.FgYellow, color.Bold)
+		fmt.Printf("%s %d database write error(s) occurred. Offline mode may be incomplete.\n",
+			warningColor.Sprint("Warning:"), dbErrors)
+		if !config.debugMode {
+			fmt.Println("Run with --debug to see detailed error messages.")
+		}
+	}
 }
 
 func areCrossReferenced(pr *PRActivity, issue *IssueActivity) bool {
@@ -906,7 +922,12 @@ func areCrossReferenced(pr *PRActivity, issue *IssueActivity) bool {
 
 		if err == nil && config.db != nil {
 			for _, comment := range prComments {
-				_ = config.db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment, config.debugMode)
+				if err := config.db.SavePRComment(pr.Owner, pr.Repo, prNumber, comment, config.debugMode); err != nil {
+					config.dbErrorCount.Add(1)
+					if config.debugMode {
+						fmt.Printf("  [DB] Warning: Failed to save PR comment for %s/%s#%d: %v\n", pr.Owner, pr.Repo, prNumber, err)
+					}
+				}
 			}
 		}
 	}
@@ -959,193 +980,6 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	}
 
 	return false
-}
-
-func collectActivityFromEvents(seenPRs *sync.Map, activitiesMap *sync.Map) {
-	opts := &github.ListOptions{PerPage: 100}
-
-	if config.debugMode {
-		fmt.Println("Checking recent activity events...")
-	}
-	totalPRs := 0
-
-	for page := range 3 {
-		if config.debugMode {
-			fmt.Printf("  [Events] Fetching page %d...\n", page+1)
-		}
-
-		var events []*github.Event
-		var resp *github.Response
-		var err error
-
-		retryErr := retryWithBackoff(func() error {
-			events, resp, err = config.client.Activity.ListEventsPerformedByUser(config.ctx, config.username, false, opts)
-			return err
-		}, fmt.Sprintf("Events-page%d", page+1))
-
-		config.progress.increment()
-		if !config.debugMode {
-			config.progress.display()
-		}
-
-		if retryErr != nil {
-			fmt.Printf("Error fetching user events after retries: %v\n", retryErr)
-			break
-		}
-
-		for _, event := range events {
-			if event.Type == nil || event.Repo == nil {
-				continue
-			}
-
-			eventType := *event.Type
-			if eventType == "PullRequestEvent" ||
-				eventType == "PullRequestReviewEvent" ||
-				eventType == "PullRequestReviewCommentEvent" ||
-				eventType == "IssueCommentEvent" {
-
-				repoName := *event.Repo.Name
-				parts := strings.Split(repoName, "/")
-				if len(parts) != 2 {
-					continue
-				}
-				owner, repo := parts[0], parts[1]
-
-				if !isRepoAllowed(owner, repo) {
-					continue
-				}
-
-				var prNumber int
-				if eventType == "PullRequestEvent" && event.Payload() != nil {
-					if prEvent, ok := event.Payload().(*github.PullRequestEvent); ok && prEvent.PullRequest != nil {
-						prNumber = *prEvent.PullRequest.Number
-					}
-				} else if eventType == "PullRequestReviewEvent" && event.Payload() != nil {
-					if reviewEvent, ok := event.Payload().(*github.PullRequestReviewEvent); ok && reviewEvent.PullRequest != nil {
-						prNumber = *reviewEvent.PullRequest.Number
-					}
-				} else if eventType == "PullRequestReviewCommentEvent" && event.Payload() != nil {
-					if commentEvent, ok := event.Payload().(*github.PullRequestReviewCommentEvent); ok && commentEvent.PullRequest != nil {
-						prNumber = *commentEvent.PullRequest.Number
-					}
-				} else if eventType == "IssueCommentEvent" && event.Payload() != nil {
-					if issueEvent, ok := event.Payload().(*github.IssueCommentEvent); ok && issueEvent.Issue != nil && issueEvent.Issue.IsPullRequest() {
-						prNumber = *issueEvent.Issue.Number
-					}
-				}
-
-				if prNumber > 0 {
-					prKey := fmt.Sprintf("%s/%s#%d", owner, repo, prNumber)
-
-					label := "Recent Activity"
-
-					// Check if we've already processed this PR in activitiesMap
-					existingActivity, alreadyProcessed := activitiesMap.Load(prKey)
-					shouldProcess := true
-
-					if alreadyProcessed {
-						// PR is already in activitiesMap, check if we need to update the label
-						existingPR := existingActivity.(*PRActivity)
-						if shouldUpdateLabel(existingPR.Label, label, true) {
-							// New label has higher priority, we'll update it
-							if config.debugMode {
-								fmt.Printf("  [Events] Updating label for %s from %s to %s (higher priority)\n", prKey, existingPR.Label, label)
-							}
-						} else {
-							// Existing label has higher or equal priority, but we should still check for updates
-							// by fetching the PR if it's needed. For events, we always fetch fresh data anyway
-							// so we'll process it to check for updates but keep the existing label
-							if config.debugMode {
-								fmt.Printf("  [Events] Checking for updates on %s (keeping label %s)\n", prKey, existingPR.Label)
-							}
-						}
-					}
-
-					if shouldProcess {
-						config.progress.addToTotal(1)
-						if !config.debugMode {
-							config.progress.display()
-						}
-
-						var pr *github.PullRequest
-						var prErr error
-
-						retryErr := retryWithBackoff(func() error {
-							pr, _, prErr = config.client.PullRequests.Get(config.ctx, owner, repo, prNumber)
-							return prErr
-						}, fmt.Sprintf("Events-PR#%d", prNumber))
-
-						config.progress.increment()
-						if !config.debugMode {
-							config.progress.display()
-						}
-
-						if retryErr != nil || pr.GetState() != "open" {
-							continue
-						}
-
-						hasUpdates := false
-
-						if config.db != nil {
-							cachedPR, err := config.db.GetPullRequest(owner, repo, prNumber)
-							if err == nil {
-								if pr.GetUpdatedAt().After(cachedPR.GetUpdatedAt().Time) {
-									hasUpdates = true
-									if config.debugMode {
-										fmt.Printf("  [Events] Update detected: %s/%s#%d (API: %s > DB: %s)\n",
-											owner, repo, prNumber,
-											pr.GetUpdatedAt().Format("2006-01-02 15:04:05"),
-											cachedPR.GetUpdatedAt().Time.Format("2006-01-02 15:04:05"))
-									}
-								}
-							} else {
-								// If there's no cached version, this is a new PR, so it has "updates"
-								hasUpdates = true
-							}
-						}
-
-						// Determine the final label to use
-						finalLabel := label
-						if alreadyProcessed {
-							existingPR := existingActivity.(*PRActivity)
-							if !shouldUpdateLabel(existingPR.Label, label, true) {
-								// Keep the existing higher-priority label
-								finalLabel = existingPR.Label
-							}
-						}
-
-						if config.db != nil {
-							_ = config.db.SavePullRequestWithLabel(owner, repo, pr, finalLabel, config.debugMode)
-						}
-
-						activity := PRActivity{
-							Label:      finalLabel,
-							Owner:      owner,
-							Repo:       repo,
-							PR:         pr,
-							UpdatedAt:  pr.GetUpdatedAt().Time,
-							HasUpdates: hasUpdates,
-						}
-						activitiesMap.Store(prKey, &activity)
-						totalPRs++
-					}
-				}
-			}
-		}
-
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
-	}
-
-	if config.debugMode {
-		if totalPRs > 0 {
-			fmt.Printf("  [Events] Complete: %d PRs found\n", totalPRs)
-		} else {
-			fmt.Println("  [Events] Complete: no new PRs found")
-		}
-	}
 }
 
 func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap *sync.Map) {
@@ -1391,7 +1225,12 @@ func collectSearchResults(query, label string, seenPRs *sync.Map, activitiesMap 
 				}
 
 				if config.db != nil {
-					_ = config.db.SavePullRequestWithLabel(owner, repo, pr, finalLabel, config.debugMode)
+					if err := config.db.SavePullRequestWithLabel(owner, repo, pr, finalLabel, config.debugMode); err != nil {
+						config.dbErrorCount.Add(1)
+						if config.debugMode {
+							fmt.Printf("  [DB] Warning: Failed to save PR %s/%s#%d: %v\n", owner, repo, pr.GetNumber(), err)
+						}
+					}
 				}
 
 				activity := PRActivity{
@@ -1675,7 +1514,12 @@ func collectIssueSearchResults(query, label string, seenIssues *sync.Map, issueA
 							hasUpdates = true
 						}
 					}
-					_ = config.db.SaveIssueWithLabel(owner, repo, issue, label, config.debugMode)
+					if err := config.db.SaveIssueWithLabel(owner, repo, issue, label, config.debugMode); err != nil {
+						config.dbErrorCount.Add(1)
+						if config.debugMode {
+							fmt.Printf("  [DB] Warning: Failed to save issue %s/%s#%d: %v\n", owner, repo, *issue.Number, err)
+						}
+					}
 				}
 
 				activity := IssueActivity{
