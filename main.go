@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -164,7 +165,7 @@ func retryWithBackoff(operation func() error, operationName string) error {
 	const (
 		initialBackoff = 1 * time.Second
 		maxBackoff     = 30 * time.Second
-		backoffFactor  = 2.0
+		backoffFactor  = 1.5
 	)
 
 	backoff := initialBackoff
@@ -176,16 +177,67 @@ func retryWithBackoff(operation func() error, operationName string) error {
 			return nil
 		}
 
-		isRateLimitError := strings.Contains(err.Error(), "rate limit") ||
-			strings.Contains(err.Error(), "API rate limit exceeded") ||
-			strings.Contains(err.Error(), "403")
+		// Check if this is a GitHub rate limit error with reset time
+		var rateLimitErr *github.RateLimitError
+		var abuseRateLimitErr *github.AbuseRateLimitError
+		var waitTime time.Duration
+		var isRateLimitError bool
 
-		if isRateLimitError {
-			waitTime := time.Duration(math.Min(float64(backoff), float64(maxBackoff)))
+		if errors.As(err, &rateLimitErr) {
+			// Primary rate limit error - use the reset time from the error
+			isRateLimitError = true
+			resetTime := rateLimitErr.Rate.Reset.Time
+			waitTime = time.Until(resetTime)
+
+			// Add a small buffer to ensure the rate limit has definitely reset
+			waitTime += 2 * time.Second
+
+			// Cap at a reasonable maximum to avoid waiting forever if clock is wrong
+			if waitTime > 1*time.Hour {
+				waitTime = 1 * time.Hour
+			}
+
+			// Ensure we wait at least 1 second
+			if waitTime < 1*time.Second {
+				waitTime = 1 * time.Second
+			}
 
 			if config.debugMode {
-				fmt.Printf("  [%s] Rate limit hit (attempt %d), waiting %v before retry...\n",
-					operationName, attempt, waitTime)
+				fmt.Printf("  [%s] Rate limit hit (attempt %d), reset at %v, waiting %v before retry...\n",
+					operationName, attempt, resetTime.Format("15:04:05"), waitTime.Round(time.Second))
+			}
+		} else if errors.As(err, &abuseRateLimitErr) {
+			// Secondary/abuse rate limit error - use RetryAfter if available
+			isRateLimitError = true
+			if abuseRateLimitErr.RetryAfter != nil {
+				waitTime = *abuseRateLimitErr.RetryAfter
+			} else {
+				// If no RetryAfter specified, use a default wait time
+				waitTime = 60 * time.Second
+			}
+
+			if config.debugMode {
+				fmt.Printf("  [%s] Abuse rate limit hit (attempt %d), waiting %v before retry...\n",
+					operationName, attempt, waitTime.Round(time.Second))
+			}
+		} else {
+			// Check if error message suggests rate limiting (fallback for older errors)
+			isRateLimitError = strings.Contains(err.Error(), "rate limit") ||
+				strings.Contains(err.Error(), "API rate limit exceeded") ||
+				strings.Contains(err.Error(), "403")
+
+			if isRateLimitError {
+				// Fallback to exponential backoff if we can't extract reset time
+				waitTime = time.Duration(math.Min(float64(backoff), float64(maxBackoff)))
+				if config.debugMode {
+					fmt.Printf("  [%s] Rate limit hit (attempt %d), waiting %v before retry...\n",
+						operationName, attempt, waitTime)
+				}
+			}
+		}
+
+		if isRateLimitError {
+			if config.debugMode {
 				select {
 				case <-config.ctx.Done():
 					return config.ctx.Err()
@@ -212,6 +264,7 @@ func retryWithBackoff(operation func() error, operationName string) error {
 
 			backoff = time.Duration(float64(backoff) * backoffFactor)
 		} else {
+			// Non-rate-limit error - use exponential backoff
 			waitTime := time.Duration(math.Min(float64(backoff)/2, float64(5*time.Second)))
 
 			if config.debugMode {
@@ -241,7 +294,7 @@ func retryWithBackoff(operation func() error, operationName string) error {
 				}
 			}
 
-			backoff = time.Duration(float64(backoff) * 1.5)
+			backoff = time.Duration(float64(backoff) * backoffFactor)
 		}
 
 		attempt++
